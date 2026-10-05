@@ -1,8 +1,27 @@
 # Brainly — installable notes + flashcards app
 
-Fully self-contained, no build step, no API key, no account. Works
-identically whether you're using it inside Claude or deployed on GitHub
-Pages — nothing in this version depends on being inside Claude.
+Fully self-contained: no build step, no API key, no account, no sync service.
+Your notes live on the device you're using. To carry them anywhere, use the
+**Files** page (📁 in the sidebar): download a backup file, keep it in your
+Google Drive, and upload it on another device. The page explains each step.
+
+## What changed in this version (simpler on purpose)
+
+- **New Files page** — every upload/download in one place, with instructions:
+  download/upload a full backup, move a single subject, and import from
+  Kindle, PDF, Markdown or a web article.
+- **Removed the AI features and API keys** (Summarize, Format, Auto-flashcards,
+  Ask about a note, Ask your library) — they were slow and unreliable.
+- **Removed Google Drive sync/backup** — your backup file in Drive replaces it.
+  (`GOOGLE_DRIVE_SETUP.md` is gone for the same reason.)
+- The sidebar is now just Home, Files, your subjects, and the Dark / Reminders /
+  passcode toggles.
+- Browser data is kept in IndexedDB (no ~5 MB cap); older data is picked up
+  automatically.
+
+The feature notes further down are a running history. Anything that mentions
+AI features, API keys or Drive sync describes a version that no longer exists.
+
 
 ## Deploy to GitHub Pages
 

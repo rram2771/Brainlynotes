@@ -1,464 +1,330 @@
 "use strict";
-const { useState, useEffect, useRef, useMemo } = React;
+const {
+  useState,
+  useEffect,
+  useRef,
+  useMemo
+} = React;
 // ---------- Palette & constants ----------
-const SUBJECT_COLORS = [
-    { name: "Indigo", hex: "#6C5CE7" },
-    { name: "Teal", hex: "#00B39F" },
-    { name: "Coral", hex: "#FF6B6B" },
-    { name: "Sunshine", hex: "#F5A623" },
-    { name: "Mint", hex: "#2ECC71" },
-    { name: "Sky", hex: "#339CFF" },
-    { name: "Berry", hex: "#C44FC0" },
-    { name: "Rose", hex: "#FF4D8D" },
-];
-const NOTE_COLORS = [
-    { name: "Default", hex: null },
-    { name: "Coral", hex: "#FFE1DC" },
-    { name: "Sunshine", hex: "#FFF3C4" },
-    { name: "Mint", hex: "#D3F5E3" },
-    { name: "Sky", hex: "#D6EBFF" },
-    { name: "Lavender", hex: "#E9DFFB" },
-    { name: "Peach", hex: "#FFE6C7" },
-    { name: "Pink", hex: "#FFDCEF" },
-];
+
+const SUBJECT_COLORS = [{
+  name: "Indigo",
+  hex: "#6C5CE7"
+}, {
+  name: "Teal",
+  hex: "#00B39F"
+}, {
+  name: "Coral",
+  hex: "#FF6B6B"
+}, {
+  name: "Sunshine",
+  hex: "#F5A623"
+}, {
+  name: "Mint",
+  hex: "#2ECC71"
+}, {
+  name: "Sky",
+  hex: "#339CFF"
+}, {
+  name: "Berry",
+  hex: "#C44FC0"
+}, {
+  name: "Rose",
+  hex: "#FF4D8D"
+}];
+const NOTE_COLORS = [{
+  name: "Default",
+  hex: null
+}, {
+  name: "Coral",
+  hex: "#FFE1DC"
+}, {
+  name: "Sunshine",
+  hex: "#FFF3C4"
+}, {
+  name: "Mint",
+  hex: "#D3F5E3"
+}, {
+  name: "Sky",
+  hex: "#D6EBFF"
+}, {
+  name: "Lavender",
+  hex: "#E9DFFB"
+}, {
+  name: "Peach",
+  hex: "#FFE6C7"
+}, {
+  name: "Pink",
+  hex: "#FFDCEF"
+}];
 const STORAGE_KEY = "brainly-data";
-const DRIVE_WAS_CONNECTED_KEY = "brainly-drive-was-connected"; // local-device flag, not synced
 const THEME_KEY = "brainly-theme";
 const REMINDERS_KEY = "brainly-reminders";
-const OPENROUTER_KEY_STORAGE_KEY = "brainly-openrouter-key"; // deliberately its own storage key, separate from
-// STORAGE_KEY (the main data blob) — so it's never swept up in Full Backup, subject export, or Drive sync,
-// none of which should ever carry a secret out of this device.
-const BOX_INTERVAL_DAYS = { 1: 0, 2: 1, 3: 3, 4: 7, 5: 14 };
+const BOX_INTERVAL_DAYS = {
+  1: 0,
+  2: 1,
+  3: 3,
+  4: 7,
+  5: 14
+};
 const POINTS_PER_CORRECT = 10;
+const FILES_VIEW = "__files__"; // pseudo-subject id meaning "the Files page is open"
+
 // Uses Claude's window.storage when running inside a Claude artifact; falls back
 // to plain localStorage when running standalone (e.g. installed as a PWA).
 // Nothing else in this app depends on being inside Claude anymore, so both
 // environments behave identically.
+// In a regular browser the data lives in IndexedDB: localStorage is capped at roughly 5 MB per
+// site in Chrome, Firefox and Safari, and a library with image notes and occlusion cards (each
+// card keeps its own copies of the image) outgrows that — after which every save fails.
+// IndexedDB's limit is a large share of free disk space instead. Anything an older version left
+// in localStorage is still read as a fallback until a key's first save here, so existing
+// libraries carry over by themselves; the old copy is left untouched.
+let idbPromise = null;
+function openIdb() {
+  if (!idbPromise) {
+    idbPromise = new Promise((resolve, reject) => {
+      if (typeof indexedDB === "undefined") return reject(new Error("IndexedDB unavailable"));
+      const req = indexedDB.open("brainly", 1);
+      req.onupgradeneeded = () => req.result.createObjectStore("kv");
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+      req.onblocked = () => reject(new Error("IndexedDB blocked"));
+    });
+    idbPromise.catch(() => {
+      idbPromise = null;
+    });
+  }
+  return idbPromise;
+}
+function idbGet(key) {
+  return openIdb().then(db => new Promise((resolve, reject) => {
+    const req = db.transaction("kv").objectStore("kv").get(key);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  }));
+}
+function idbSet(key, value) {
+  return openIdb().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction("kv", "readwrite");
+    tx.objectStore("kv").put(value, key);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error("IndexedDB write aborted"));
+  }));
+}
+// Asks the browser not to evict this site's data under storage pressure (it can otherwise
+// clear IndexedDB for sites it considers low-priority). Best effort; browsers may decline.
+if (typeof navigator !== "undefined" && navigator.storage && navigator.storage.persist && typeof window !== "undefined" && !window.storage && !window.AndroidBridge) {
+  navigator.storage.persist().catch(() => {});
+}
 const storage = {
-    async get(key) {
-        if (typeof window !== "undefined" && window.storage) {
-            return window.storage.get(key, false);
-        }
-        const v = localStorage.getItem(key);
-        return v !== null ? { key, value: v } : null;
-    },
-    async set(key, value) {
-        if (typeof window !== "undefined" && window.storage) {
-            return window.storage.set(key, value, false);
-        }
-        localStorage.setItem(key, value);
-        return { key, value };
-    },
+  async get(key) {
+    if (typeof window !== "undefined" && window.storage) {
+      return window.storage.get(key, false);
+    }
+    // Android app: data lives in native files (no ~5.2M-character localStorage cap). A key
+    // that's never been written there yet falls back to what an older version left in
+    // localStorage, so existing libraries carry over on the first save after an update.
+    if (typeof window !== "undefined" && window.AndroidBridge && window.AndroidBridge.storageGet) {
+      const native = window.AndroidBridge.storageGet(key);
+      if (native !== null && native !== undefined) return {
+        key,
+        value: native
+      };
+    } else {
+      try {
+        const v = await idbGet(key);
+        if (v !== undefined && v !== null) return {
+          key,
+          value: v
+        };
+      } catch (e) {
+        // IndexedDB unavailable (some private-browsing modes): fall through to localStorage
+      }
+    }
+    const v = localStorage.getItem(key);
+    return v !== null ? {
+      key,
+      value: v
+    } : null;
+  },
+  async set(key, value) {
+    if (typeof window !== "undefined" && window.storage) {
+      return window.storage.set(key, value, false);
+    }
+    if (typeof window !== "undefined" && window.AndroidBridge && window.AndroidBridge.storageSet) {
+      if (!window.AndroidBridge.storageSet(key, value)) throw new Error("Couldn't write to device storage");
+      return {
+        key,
+        value
+      };
+    }
+    let idbAvailable = true;
+    try {
+      await openIdb();
+    } catch (e) {
+      idbAvailable = false; // e.g. some private-browsing modes: keep working on localStorage
+    }
+    if (idbAvailable) {
+      // A real write failure (disk full, etc.) is deliberately NOT swallowed into localStorage:
+      // reads prefer IndexedDB, so a silent fallback there would later serve the stale copy.
+      await idbSet(key, value);
+      return {
+        key,
+        value
+      };
+    }
+    localStorage.setItem(key, value);
+    return {
+      key,
+      value
+    };
+  }
 };
-// ---------- OpenRouter (AI features: summarize, ask, format, auto-flashcards) ----------
-// Bring-your-own-key, stored only in this browser (see
-// OPENROUTER_KEY_STORAGE_KEY above) and sent directly from here to
-// OpenRouter — this is Anthropic's/OpenRouter's own documented pattern
-// for a personal client-side tool, not a workaround. The tradeoff
-// worth knowing plainly: that key is visible to anyone with access to
-// this browser's dev tools, same as any other bring-your-own-key
-// client-side app.
-const OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
-const OPENROUTER_FREE_MODEL = "openrouter/free"; // a router that auto-picks from whatever's currently free —
-// deliberately not a specific model id, since individual free models on OpenRouter rotate out with little notice.
-async function callOpenRouter(apiKey, messages, opts = {}) {
-    if (!apiKey)
-        throw new Error("Add your OpenRouter API key in Settings first.");
-    let response;
-    try {
-        response = await fetch(OPENROUTER_API_URL, {
-            method: "POST",
-            headers: {
-                Authorization: `Bearer ${apiKey}`,
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-                model: opts.model || OPENROUTER_FREE_MODEL,
-                messages,
-                max_tokens: opts.maxTokens || 1024,
-            }),
-        });
-    }
-    catch (e) {
-        throw new Error("Couldn't reach OpenRouter — check your connection and try again.");
-    }
-    if (!response.ok) {
-        if (response.status === 401)
-            throw new Error("That OpenRouter API key was rejected — check it in Settings.");
-        if (response.status === 429)
-            throw new Error("OpenRouter's free-tier rate limit was hit — wait a bit and try again.");
-        let detail = "";
-        try {
-            const errJson = await response.json();
-            detail = errJson && errJson.error && errJson.error.message ? `: ${errJson.error.message}` : "";
-        }
-        catch (e) {
-            // body wasn't JSON — no extra detail available
-        }
-        throw new Error(`OpenRouter returned an error (status ${response.status})${detail}`);
-    }
-    const json = await response.json();
-    const text = json && json.choices && json.choices[0] && json.choices[0].message && json.choices[0].message.content;
-    if (!text)
-        throw new Error("OpenRouter returned an empty response — try again.");
-    return text;
-}
-function buildSummarizePrompt(noteTitle, plainText) {
-    return [
-        { role: "system", content: "You summarize study notes concisely and accurately. Reply with ONLY the summary — no preamble, no \"Here's a summary:\", nothing else." },
-        { role: "user", content: `Summarize this note in 2-4 sentences.\n\nTitle: ${noteTitle}\n\n${plainText}` },
-    ];
-}
-function buildFormatPrompt(rawText) {
-    return [
-        {
-            role: "system",
-            content: "You clean up messy pasted text into well-structured HTML for a note editor. Use only these tags: <p>, <h3>, <h4>, <ul>, <li>, <strong>, <em>, <blockquote>. Preserve all the original content and meaning — reorganize and format only, never summarize, shorten, or add new information. Reply with ONLY the HTML — no code fences, no explanation, nothing else.",
-        },
-        { role: "user", content: rawText },
-    ];
-}
-function buildFlashcardsPrompt(noteTitle, plainText) {
-    return [
-        {
-            role: "system",
-            content: 'You turn study notes into flashcards. Reply with ONLY a JSON array of objects shaped like {"front": "...", "back": "..."} — no markdown code fences, no explanation, no other text. Generate between 3 and 12 cards depending on how much real content is in the note; each front should be a genuine question or prompt (not just a restated heading), each back a concise, complete answer.',
-        },
-        { role: "user", content: `Title: ${noteTitle}\n\n${plainText}` },
-    ];
-}
-function buildAskPrompt(question, contextText) {
-    return [
-        {
-            role: "system",
-            content: "You answer questions using ONLY the provided notes as context. If the notes don't contain the answer, say so plainly rather than guessing or using outside knowledge. Keep answers concise.",
-        },
-        { role: "user", content: `Notes:\n${contextText}\n\nQuestion: ${question}` },
-    ];
-}
-// Concatenates notes (title + plain-text body, each clearly delimited
-// so the model can tell where one note ends and the next begins) up
-// to a character budget, since free-tier models often have smaller
-// context windows than premium ones and a whole library could easily
-// run to hundreds of thousands of characters. Stops adding notes once
-// the budget's hit rather than truncating mid-note, and reports how
-// many notes actually made it in so a truncated answer is never
-// silently passed off as covering everything.
-function buildLibraryContext(notes, htmlToPlainTextFn, charBudget = 15000) {
-    const parts = [];
-    let used = 0;
-    let includedCount = 0;
-    for (const n of notes) {
-        const plain = htmlToPlainTextFn(n.bodyHTML);
-        const entry = `--- ${n.title || "Untitled"} ---\n${plain}`;
-        if (used + entry.length > charBudget && includedCount > 0)
-            break;
-        parts.push(entry);
-        used += entry.length;
-        includedCount++;
-    }
-    return { contextText: parts.join("\n\n"), includedCount, totalCount: notes.length };
-}
-// The model's JSON often arrives wrapped in a markdown code fence
-// (```json ... ```) even when explicitly told not to — a common,
-// well-known LLM habit, not a sign something went wrong. Strips that
-// before parsing rather than failing on it. Silently drops any card
-// missing a real front/back rather than crashing the whole batch over
-// one malformed entry.
-function parseFlashcardsResponse(responseText) {
-    const cleaned = responseText.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
-    let parsed;
-    try {
-        parsed = JSON.parse(cleaned);
-    }
-    catch (e) {
-        throw new Error("Couldn't understand the AI's response as flashcards — try again.");
-    }
-    if (!Array.isArray(parsed))
-        throw new Error("Couldn't understand the AI's response as flashcards — try again.");
-    return parsed
-        .filter((c) => c && typeof c.front === "string" && c.front.trim() && typeof c.back === "string" && c.back.trim())
-        .map((c) => ({ front: c.front.trim(), back: c.back.trim() }));
-}
-// ---------- Google Drive sync (standalone PWA only) ----------
-// Uses Google Identity Services for auth (no client secret needed — this
-// runs entirely in the browser) and the drive.file scope, which restricts
-// the app to only ever seeing files IT created, never the rest of the
-// user's Drive. This whole module is a no-op inside the Claude artifact
-// preview: Google's OAuth popup can't complete inside that sandboxed
-// iframe, so every function below checks for that and fails harmlessly.
-//
-// SETUP REQUIRED before this works: replace GOOGLE_CLIENT_ID below with a
-// real OAuth Client ID from a Google Cloud project (Drive API enabled,
-// OAuth consent screen configured, your own Google account added as a
-// test user, this site's URL added as an authorized JavaScript origin).
-// Until that's done, driveIsAvailable() returns false and sync stays
-// invisible in the UI — nothing else in the app is affected.
-const GOOGLE_CLIENT_ID = "YOUR_CLIENT_ID_HERE.apps.googleusercontent.com";
-const DRIVE_FILE_NAME = "brainly-sync-data.json";
-const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
-let driveTokenClient = null;
-let driveAccessToken = null;
-let driveFileIdCache = null;
-function driveIsAvailable() {
-    return (typeof window !== "undefined" &&
-        !window.storage && // never inside the Claude artifact — see note above
-        !GOOGLE_CLIENT_ID.startsWith("YOUR_CLIENT_ID") &&
-        !!(window.google && window.google.accounts && window.google.accounts.oauth2));
-}
-let drivePendingCallback = null; // whichever caller most recently asked for a token
-function driveEnsureTokenClient() {
-    if (!driveIsAvailable() || driveTokenClient)
-        return;
-    driveTokenClient = window.google.accounts.oauth2.initTokenClient({
-        client_id: GOOGLE_CLIENT_ID,
-        scope: DRIVE_SCOPE,
-        callback: (resp) => {
-            if (resp && resp.access_token) {
-                driveAccessToken = resp.access_token;
-                if (drivePendingCallback) {
-                    const cb = drivePendingCallback;
-                    drivePendingCallback = null;
-                    cb(driveAccessToken);
-                }
-            }
-        },
-    });
-}
-// Multiple independent features (auto-sync, manual backup) can each ask for
-// access; the token client itself is created once and reused, but each
-// call here gets its OWN follow-up run when the token arrives.
-// silent:true attempts a no-popup reconnect (works if the browser still has
-// an active Google session and consent from before) — used on app load so
-// returning to an already-connected device doesn't require clicking
-// "Connect" again. If the silent attempt can't complete, Google's callback
-// just never fires; there's no error to show, the Connect button stays put.
-function driveRequestAccess(onToken, opts = {}) {
-    driveEnsureTokenClient();
-    if (!driveTokenClient)
-        return;
-    drivePendingCallback = onToken;
-    driveTokenClient.requestAccessToken(opts.silent ? { prompt: "" } : {});
-}
-function driveSignOut() {
-    if (driveAccessToken && window.google) {
-        window.google.accounts.oauth2.revoke(driveAccessToken, () => { });
-    }
-    driveAccessToken = null;
-    driveFileIdCache = null;
-}
-async function driveFindOrCreateFile() {
-    if (driveFileIdCache)
-        return driveFileIdCache;
-    const listRes = await fetch(`https://www.googleapis.com/drive/v3/files?q=name%3D%27${DRIVE_FILE_NAME}%27+and+trashed%3Dfalse&spaces=drive&fields=files(id)`, { headers: { Authorization: `Bearer ${driveAccessToken}` } });
-    if (!listRes.ok)
-        throw new Error("Drive list failed");
-    const listData = await listRes.json();
-    if (listData.files && listData.files.length > 0) {
-        driveFileIdCache = listData.files[0].id;
-        return driveFileIdCache;
-    }
-    const createRes = await fetch("https://www.googleapis.com/drive/v3/files", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${driveAccessToken}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ name: DRIVE_FILE_NAME }),
-    });
-    if (!createRes.ok)
-        throw new Error("Drive create failed");
-    const createData = await createRes.json();
-    driveFileIdCache = createData.id;
-    return driveFileIdCache;
-}
-async function drivePull() {
-    const fileId = await driveFindOrCreateFile();
-    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
-        headers: { Authorization: `Bearer ${driveAccessToken}` },
-    });
-    if (!res.ok)
-        throw new Error("Drive pull failed");
-    const text = await res.text();
-    if (!text.trim())
-        return null;
-    return JSON.parse(text);
-}
-async function drivePush(data) {
-    const fileId = await driveFindOrCreateFile();
-    const res = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
-        method: "PATCH",
-        headers: { Authorization: `Bearer ${driveAccessToken}`, "Content-Type": "application/json" },
-        body: JSON.stringify(data),
-    });
-    if (!res.ok)
-        throw new Error("Drive push failed");
-}
-async function driveGetModifiedTime() {
-    const fileId = await driveFindOrCreateFile();
-    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=modifiedTime`, {
-        headers: { Authorization: `Bearer ${driveAccessToken}` },
-    });
-    if (!res.ok)
-        throw new Error("Drive metadata fetch failed");
-    const data = await res.json();
-    return data.modifiedTime;
-}
-// Manual, on-demand snapshot — deliberately separate from the live sync
-// file above. Each call creates a NEW, timestamped file rather than
-// overwriting one, so you build up a set of dated backups you can fall
-// back to, independent of whatever auto-sync is currently doing.
-function driveBackupFilename() {
-    return `brainly-backup-${nowISO().replace(/[:.]/g, "-")}.json`;
-}
-async function driveCreateBackup(data) {
-    const filename = driveBackupFilename();
-    const createRes = await fetch("https://www.googleapis.com/drive/v3/files", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${driveAccessToken}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ name: filename }),
-    });
-    if (!createRes.ok)
-        throw new Error("Backup create failed");
-    const createData = await createRes.json();
-    const uploadRes = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${createData.id}?uploadType=media`, {
-        method: "PATCH",
-        headers: { Authorization: `Bearer ${driveAccessToken}`, "Content-Type": "application/json" },
-        body: JSON.stringify(data),
-    });
-    if (!uploadRes.ok)
-        throw new Error("Backup upload failed");
-    return filename;
-}
+
 // ---------- Passcode lock ----------
 // A UI-level gate, not encryption: it stops someone who picks up the device
 // from casually opening the app, but the underlying data (in local storage
-// or a synced Drive file) is never actually encrypted, so it isn't real
+// or in a backup file) is never actually encrypted, so it isn't real
 // protection against someone deliberately digging into browser storage.
 // Only the hash is ever stored, never the passcode itself. If crypto.subtle
 // isn't available (very old browser, or a non-secure context), the whole
 // feature quietly stays hidden rather than breaking anything.
+
 function pinLockAvailable() {
-    return typeof window !== "undefined" && !!(window.crypto && window.crypto.subtle);
+  return typeof window !== "undefined" && !!(window.crypto && window.crypto.subtle);
 }
 async function hashPin(pin) {
-    const enc = new TextEncoder().encode("brainly-pin-salt-v1:" + pin);
-    const buf = await window.crypto.subtle.digest("SHA-256", enc);
-    return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+  const enc = new TextEncoder().encode("brainly-pin-salt-v1:" + pin);
+  const buf = await window.crypto.subtle.digest("SHA-256", enc);
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
 }
+
 // ---------- Generic helpers ----------
+
 function uid() {
-    return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 function nowISO() {
-    return new Date().toISOString();
+  return new Date().toISOString();
 }
 function addDays(n) {
-    const d = new Date();
-    d.setDate(d.getDate() + n);
-    return d.toISOString();
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  return d.toISOString();
 }
 function formatDate(iso) {
-    const d = new Date(iso);
-    return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  const d = new Date(iso);
+  return d.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric"
+  });
 }
 function formatRelativeTime(iso) {
-    const diffMs = Date.now() - new Date(iso).getTime();
-    const mins = Math.floor(diffMs / 60000);
-    if (mins < 1)
-        return "just now";
-    if (mins < 60)
-        return `${mins}m ago`;
-    const hours = Math.floor(mins / 60);
-    if (hours < 24)
-        return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    return `${days}d ago`;
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
 }
 function slug(s) {
-    return (s || "untitled").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "untitled";
+  return (s || "untitled").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "untitled";
 }
 function escapeHTML(str) {
-    const div = document.createElement("div");
-    div.textContent = str || "";
-    return div.innerHTML;
+  const div = document.createElement("div");
+  div.textContent = str || "";
+  return div.innerHTML;
 }
 function htmlToPlainText(html) {
-    if (!html)
-        return "";
-    // Insert newline/bullet markers at block boundaries before stripping tags,
-    // so headings, paragraphs, and list items don't run together in exports/search.
-    const withMarkers = html
-        .replace(/<li([^>]*)>/gi, "<li$1>- ")
-        .replace(/<\/(div|p|h1|h2|h3|h4|h5|h6|li)>/gi, "$&\n")
-        .replace(/<br\s*\/?>/gi, "<br/>\n");
-    const div = document.createElement("div");
-    div.innerHTML = withMarkers;
-    const text = div.textContent || div.innerText || "";
-    return text.replace(/\n{3,}/g, "\n\n").trim();
+  if (!html) return "";
+  // Insert newline/bullet markers at block boundaries before stripping tags,
+  // so headings, paragraphs, and list items don't run together in exports/search.
+  const withMarkers = html.replace(/<li([^>]*)>/gi, "<li$1>- ").replace(/<\/(div|p|h1|h2|h3|h4|h5|h6|li)>/gi, "$&\n").replace(/<br\s*\/?>/gi, "<br/>\n");
+  const div = document.createElement("div");
+  div.innerHTML = withMarkers;
+  const text = div.textContent || div.innerText || "";
+  return text.replace(/\n{3,}/g, "\n\n").trim();
 }
+
+// Whether a note has anything worth saving. Checking typed text alone (as every save path
+// used to) treats a note that's only a title plus pasted/inserted images — e.g. an EKG strip
+// titled "PVC" — as empty, so it was silently discarded on Add with no message at all.
+function noteHasContent(title, bodyHTML, images) {
+  if ((title || "").trim()) return true;
+  if ((images || []).length) return true;
+  if (/<img\b/i.test(bodyHTML || "")) return true;
+  return !!htmlToPlainText(bodyHTML).trim();
+}
+
 // Pulls a short window of text around the first match, like search-engine
 // result snippets ("...text before MATCH text after..."), instead of always
 // starting from the beginning of the note.
 function extractSnippet(text, query, contextChars) {
-    const ctx = contextChars || 60;
-    const flat = text.replace(/\s+/g, " ").trim();
-    const idx = flat.toLowerCase().indexOf(query.toLowerCase());
-    if (idx === -1)
-        return flat.slice(0, ctx * 2);
-    const start = Math.max(0, idx - ctx);
-    const end = Math.min(flat.length, idx + query.length + ctx);
-    return (start > 0 ? "…" : "") + flat.slice(start, end) + (end < flat.length ? "…" : "");
+  const ctx = contextChars || 60;
+  const flat = text.replace(/\s+/g, " ").trim();
+  const idx = flat.toLowerCase().indexOf(query.toLowerCase());
+  if (idx === -1) return flat.slice(0, ctx * 2);
+  const start = Math.max(0, idx - ctx);
+  const end = Math.min(flat.length, idx + query.length + ctx);
+  return (start > 0 ? "…" : "") + flat.slice(start, end) + (end < flat.length ? "…" : "");
 }
 function download(filename, text, mime = "text/markdown;charset=utf-8") {
-    const blob = new Blob([text], { type: mime });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+  const blob = new Blob([text], {
+    type: mime
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (e) {
     try {
-        await navigator.clipboard.writeText(text);
-        return true;
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      return true;
+    } catch (e2) {
+      return false;
     }
-    catch (e) {
-        try {
-            const ta = document.createElement("textarea");
-            ta.value = text;
-            ta.style.position = "fixed";
-            ta.style.opacity = "0";
-            document.body.appendChild(ta);
-            ta.select();
-            document.execCommand("copy");
-            document.body.removeChild(ta);
-            return true;
-        }
-        catch (e2) {
-            return false;
-        }
-    }
+  }
 }
 async function shareText(title, text) {
-    if (navigator.share) {
-        try {
-            await navigator.share({ title, text });
-            return "shared";
-        }
-        catch (e) {
-            if (e && e.name === "AbortError")
-                return "cancelled";
-        }
+  if (navigator.share) {
+    try {
+      await navigator.share({
+        title,
+        text
+      });
+      return "shared";
+    } catch (e) {
+      if (e && e.name === "AbortError") return "cancelled";
     }
-    const ok = await copyText(text);
-    return ok ? "copied" : "failed";
+  }
+  const ok = await copyText(text);
+  return ok ? "copied" : "failed";
 }
 function printHTML(title, bodyHTML) {
-    const win = window.open("", "_blank");
-    if (!win)
-        return false;
-    win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title>
+  const win = window.open("", "_blank");
+  if (!win) return false;
+  win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title>
     <style>
       body { font-family: 'Inter', -apple-system, sans-serif; color: #241C3D; max-width: 720px; margin: 40px auto; padding: 0 20px; line-height: 1.6; }
       h1 { font-family: 'Baloo 2', sans-serif; }
@@ -472,54 +338,56 @@ function printHTML(title, bodyHTML) {
       hr { border: none; border-top: 1px solid #EAE6F7; margin: 24px 0; }
     </style>
     </head><body>${bodyHTML}</body></html>`);
-    win.document.close();
-    win.focus();
-    setTimeout(() => win.print(), 300);
-    return true;
+  win.document.close();
+  win.focus();
+  setTimeout(() => win.print(), 300);
+  return true;
 }
 function compressImage(file, maxDim = 900, quality = 0.72) {
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onerror = () => reject(new Error("Couldn't read image"));
-        reader.onload = () => {
-            const img = new Image();
-            img.onerror = () => reject(new Error("Couldn't load image"));
-            img.onload = () => {
-                let { width, height } = img;
-                if (width > maxDim || height > maxDim) {
-                    if (width > height) {
-                        height = Math.round((height * maxDim) / width);
-                        width = maxDim;
-                    }
-                    else {
-                        width = Math.round((width * maxDim) / height);
-                        height = maxDim;
-                    }
-                }
-                const canvas = document.createElement("canvas");
-                canvas.width = width;
-                canvas.height = height;
-                const ctx = canvas.getContext("2d");
-                ctx.drawImage(img, 0, 0, width, height);
-                resolve(canvas.toDataURL("image/jpeg", quality));
-            };
-            img.src = reader.result;
-        };
-        reader.readAsDataURL(file);
-    });
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Couldn't read image"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("Couldn't load image"));
+      img.onload = () => {
+        let {
+          width,
+          height
+        } = img;
+        if (width > maxDim || height > maxDim) {
+          if (width > height) {
+            height = Math.round(height * maxDim / width);
+            width = maxDim;
+          } else {
+            width = Math.round(width * maxDim / height);
+            height = maxDim;
+          }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
 }
 function imageFilesFromPasteOrDrop(items) {
-    const files = [];
-    for (let i = 0; i < items.length; i++) {
-        const item = items[i];
-        if (item.kind === "file" && item.type && item.type.startsWith("image/")) {
-            const f = item.getAsFile ? item.getAsFile() : item;
-            if (f)
-                files.push(f);
-        }
+  const files = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.kind === "file" && item.type && item.type.startsWith("image/")) {
+      const f = item.getAsFile ? item.getAsFile() : item;
+      if (f) files.push(f);
     }
-    return files;
+  }
+  return files;
 }
+
 // ============================================================
 // Markdown-paste rendering — the actual fix for "pasting from Captura
 // (or this app's own Copy as Markdown) shows a raw wall of text
@@ -537,27 +405,27 @@ function imageFilesFromPasteOrDrop(items) {
 // (the same <img class="rte-inline-image"> insertImageAtCursor
 // already produces) rather than inventing a new one.
 // ============================================================
+
 // Requires an actual markdown image reference, OR at least two
 // structural markdown lines (heading/quote/bold-label) — a single
 // stray '#' or '>' character in an otherwise ordinary pasted sentence
 // should NOT silently trigger a full markdown re-render of plain text
 // someone just meant to paste as-is.
 function looksLikeMarkdownWorthParsing(text) {
-    if (/!\[[^\]]*\]\([^)]+\)/.test(text))
-        return true;
-    const structuralLines = text.split("\n").filter((l) => /^#{1,4}\s|^>\s?\S|^\*\*[^*]+\*\*/.test(l.trim()));
-    return structuralLines.length >= 2;
+  if (/!\[[^\]]*\]\([^)]+\)/.test(text)) return true;
+  const structuralLines = text.split("\n").filter(l => /^#{1,4}\s|^>\s?\S|^\*\*[^*]+\*\*/.test(l.trim()));
+  return structuralLines.length >= 2;
 }
 function escapeAttr(str) {
-    return escapeHTML(str).replace(/"/g, "&quot;");
+  return escapeHTML(str).replace(/"/g, "&quot;");
 }
+
 // **bold** and *italic* — the one inline pattern both apps' exports
 // actually use (Captura's color label renders as *(Subject)*).
 function applyInlineMarkdown(escapedText) {
-    return escapedText
-        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-        .replace(/\*([^*]+)\*/g, "<em>$1</em>");
+  return escapedText.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/\*([^*]+)\*/g, "<em>$1</em>");
 }
+
 // Fallback ONLY — used when marked (loaded via CDN in index.html)
 // isn't available for some reason (offline on a first visit before the
 // service worker has cached it, the CDN blocked, etc.). A narrow,
@@ -565,56 +433,55 @@ function applyInlineMarkdown(escapedText) {
 // this app's own export and Captura's produce — kept as a safety net,
 // not the primary path anymore.
 function parsePastedMarkdownToHTMLFallback(text) {
-    const lines = text.replace(/\r\n/g, "\n").split("\n");
-    const htmlParts = [];
-    let paragraphBuffer = [];
-    const flushParagraph = () => {
-        if (paragraphBuffer.length) {
-            const joined = paragraphBuffer.join(" ").trim();
-            if (joined)
-                htmlParts.push(`<p>${applyInlineMarkdown(escapeHTML(joined))}</p>`);
-            paragraphBuffer = [];
-        }
-    };
-    for (const rawLine of lines) {
-        const line = rawLine.trim();
-        if (!line) {
-            flushParagraph();
-            continue;
-        }
-        const imageMatch = line.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
-        if (imageMatch) {
-            flushParagraph();
-            htmlParts.push(`<img src="${escapeAttr(imageMatch[2])}" class="rte-inline-image" alt="${escapeAttr(imageMatch[1])}" />`);
-            continue;
-        }
-        const headingMatch = line.match(/^(#{1,4})\s+(.*)$/);
-        if (headingMatch) {
-            flushParagraph();
-            // Markdown h1 becomes a visual h2 — the note's OWN title already
-            // occupies the visual h1 slot; a pasted "# Title" line shouldn't
-            // compete with it for the same size.
-            const tag = "h" + Math.min(headingMatch[1].length + 1, 4);
-            htmlParts.push(`<${tag}>${applyInlineMarkdown(escapeHTML(headingMatch[2]))}</${tag}>`);
-            continue;
-        }
-        if (/^-{3,}$/.test(line)) {
-            flushParagraph();
-            htmlParts.push("<hr />");
-            continue;
-        }
-        const quoteMatch = line.match(/^>\s?(.*)$/);
-        if (quoteMatch) {
-            flushParagraph();
-            if (quoteMatch[1])
-                htmlParts.push(`<p class="rte-pasted-quote">${applyInlineMarkdown(escapeHTML(quoteMatch[1]))}</p>`);
-            continue;
-        }
-        paragraphBuffer.push(line);
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const htmlParts = [];
+  let paragraphBuffer = [];
+  const flushParagraph = () => {
+    if (paragraphBuffer.length) {
+      const joined = paragraphBuffer.join(" ").trim();
+      if (joined) htmlParts.push(`<p>${applyInlineMarkdown(escapeHTML(joined))}</p>`);
+      paragraphBuffer = [];
     }
-    flushParagraph();
-    return htmlParts.join("");
+  };
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      flushParagraph();
+      continue;
+    }
+    const imageMatch = line.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+    if (imageMatch) {
+      flushParagraph();
+      htmlParts.push(`<img src="${escapeAttr(imageMatch[2])}" class="rte-inline-image" alt="${escapeAttr(imageMatch[1])}" />`);
+      continue;
+    }
+    const headingMatch = line.match(/^(#{1,4})\s+(.*)$/);
+    if (headingMatch) {
+      flushParagraph();
+      // Markdown h1 becomes a visual h2 — the note's OWN title already
+      // occupies the visual h1 slot; a pasted "# Title" line shouldn't
+      // compete with it for the same size.
+      const tag = "h" + Math.min(headingMatch[1].length + 1, 4);
+      htmlParts.push(`<${tag}>${applyInlineMarkdown(escapeHTML(headingMatch[2]))}</${tag}>`);
+      continue;
+    }
+    if (/^-{3,}$/.test(line)) {
+      flushParagraph();
+      htmlParts.push("<hr />");
+      continue;
+    }
+    const quoteMatch = line.match(/^>\s?(.*)$/);
+    if (quoteMatch) {
+      flushParagraph();
+      if (quoteMatch[1]) htmlParts.push(`<p class="rte-pasted-quote">${applyInlineMarkdown(escapeHTML(quoteMatch[1]))}</p>`);
+      continue;
+    }
+    paragraphBuffer.push(line);
+  }
+  flushParagraph();
+  return htmlParts.join("");
 }
+
 // Primary path — a real, mature markdown parser (loaded via CDN in
 // index.html, the same way React itself loads), the same category of
 // tool Obsidian's own comprehensive rendering is built on. Replaces
@@ -627,63 +494,62 @@ function parsePastedMarkdownToHTMLFallback(text) {
 // on <img> tags needs a manual patch afterward, since marked has no
 // built-in option for that without a full custom renderer.
 function parsePastedMarkdownToHTML(text) {
-    if (typeof marked === "undefined" || !marked || typeof marked.parse !== "function") {
-        return parsePastedMarkdownToHTMLFallback(text);
-    }
-    try {
-        const html = marked.parse(text, { breaks: true });
-        return html.replace(/<img /g, '<img class="rte-inline-image" ');
-    }
-    catch (e) {
-        return parsePastedMarkdownToHTMLFallback(text);
-    }
+  if (typeof marked === "undefined" || !marked || typeof marked.parse !== "function") {
+    return parsePastedMarkdownToHTMLFallback(text);
+  }
+  try {
+    const html = marked.parse(text, {
+      breaks: true
+    });
+    return html.replace(/<img /g, '<img class="rte-inline-image" ');
+  } catch (e) {
+    return parsePastedMarkdownToHTMLFallback(text);
+  }
 }
 function parseKindleClippings(text) {
-    const entries = text.split(/\r?\n={5,}\r?\n?/).map((e) => e.trim()).filter(Boolean);
-    const results = [];
-    entries.forEach((entry) => {
-        const lines = entry.split(/\r?\n/);
-        if (lines.length < 2)
-            return;
-        const titleLine = lines[0].trim();
-        const metaLine = lines[1].trim();
-        // Content is everything after the first blank line following the
-        // metadata line — Kindle always inserts exactly one blank line there.
-        const blankIdx = lines.findIndex((l, i) => i >= 2 && l.trim() === "");
-        const content = blankIdx === -1 ? "" : lines.slice(blankIdx + 1).join("\n").trim();
-        if (/Your Bookmark/i.test(metaLine))
-            return; // no real content to capture
-        if (!content)
-            return; // a highlight/note with no actual text isn't useful to import
-        // Author is the LAST parenthetical group on the title line — the
-        // standard Kindle convention, though not unambiguous if a title
-        // itself contains parentheses (an inherent limitation of the format
-        // itself, not something a parser can fully resolve).
-        const authorMatch = titleLine.match(/^(.*)\(([^()]+)\)\s*$/);
-        const title = authorMatch ? authorMatch[1].trim() : titleLine;
-        const author = authorMatch ? authorMatch[2].trim() : null;
-        const isNote = /Your Note/i.test(metaLine);
-        const pageMatch = metaLine.match(/page (\d+)/i);
-        const locationMatch = metaLine.match(/[Ll]ocation ([\d-]+)/);
-        const dateMatch = metaLine.match(/Added on (.+)$/i);
-        let sourceCapturedAt = null;
-        if (dateMatch) {
-            const parsed = new Date(dateMatch[1].trim());
-            if (!isNaN(parsed.getTime()))
-                sourceCapturedAt = parsed.toISOString();
-        }
-        results.push({
-            title,
-            author,
-            type: isNote ? "NOTE" : "BOOK_HIGHLIGHT",
-            content,
-            page: pageMatch ? pageMatch[1] : null,
-            location: locationMatch ? locationMatch[1] : null,
-            sourceCapturedAt,
-        });
+  const entries = text.split(/\r?\n={5,}\r?\n?/).map(e => e.trim()).filter(Boolean);
+  const results = [];
+  entries.forEach(entry => {
+    const lines = entry.split(/\r?\n/);
+    if (lines.length < 2) return;
+    const titleLine = lines[0].trim();
+    const metaLine = lines[1].trim();
+    // Content is everything after the first blank line following the
+    // metadata line — Kindle always inserts exactly one blank line there.
+    const blankIdx = lines.findIndex((l, i) => i >= 2 && l.trim() === "");
+    const content = blankIdx === -1 ? "" : lines.slice(blankIdx + 1).join("\n").trim();
+    if (/Your Bookmark/i.test(metaLine)) return; // no real content to capture
+    if (!content) return; // a highlight/note with no actual text isn't useful to import
+
+    // Author is the LAST parenthetical group on the title line — the
+    // standard Kindle convention, though not unambiguous if a title
+    // itself contains parentheses (an inherent limitation of the format
+    // itself, not something a parser can fully resolve).
+    const authorMatch = titleLine.match(/^(.*)\(([^()]+)\)\s*$/);
+    const title = authorMatch ? authorMatch[1].trim() : titleLine;
+    const author = authorMatch ? authorMatch[2].trim() : null;
+    const isNote = /Your Note/i.test(metaLine);
+    const pageMatch = metaLine.match(/page (\d+)/i);
+    const locationMatch = metaLine.match(/[Ll]ocation ([\d-]+)/);
+    const dateMatch = metaLine.match(/Added on (.+)$/i);
+    let sourceCapturedAt = null;
+    if (dateMatch) {
+      const parsed = new Date(dateMatch[1].trim());
+      if (!isNaN(parsed.getTime())) sourceCapturedAt = parsed.toISOString();
+    }
+    results.push({
+      title,
+      author,
+      type: isNote ? "NOTE" : "BOOK_HIGHLIGHT",
+      content,
+      page: pageMatch ? pageMatch[1] : null,
+      location: locationMatch ? locationMatch[1] : null,
+      sourceCapturedAt
     });
-    return results;
+  });
+  return results;
 }
+
 // Converts parsed Kindle entries into real captures — grouping by book
 // title isn't done here (each clipping becomes its own capture, since
 // that matches how the rest of this app treats one highlight as one
@@ -703,18 +569,14 @@ function parseKindleClippings(text) {
 // which also means, unlike the article-extraction feature, this can
 // actually be tested thoroughly against the real file format.
 // ============================================================
+
 function stripHtmlTagsKindle(html) {
-    return html.replace(/<[^>]+>/g, "");
+  return html.replace(/<[^>]+>/g, "");
 }
 function decodeHtmlEntitiesKindle(str) {
-    return str
-        .replace(/&amp;/g, "&")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/&quot;/g, '"')
-        .replace(/&#39;/g, "'")
-        .replace(/&nbsp;/g, " ");
+  return str.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ");
 }
+
 // Kindle's 8 highlight colors mapped onto this app's 4 content-type
 // colors — necessarily a lossy, somewhat arbitrary default (8 doesn't
 // divide evenly into 4), but a reasonable starting point: yellow (by
@@ -739,74 +601,89 @@ function decodeHtmlEntitiesKindle(str) {
 // already produces every other image in this app, rather than the
 // Blob format Captura's own separate annotation-image storage needed.
 // ============================================================
+
 function isPdfJsReady(win) {
-    return !!(win && win.pdfjsLib && typeof win.pdfjsLib.getDocument === "function");
+  return !!(win && win.pdfjsLib && typeof win.pdfjsLib.getDocument === "function");
 }
 const PDFJS_VERSION = "2.16.105"; // pre-ESM-split — v4+ doesn't expose window.pdfjsLib via a plain <script> tag
 const PDFJS_SCRIPT_URL = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}/pdf.min.js`;
 const PDFJS_WORKER_URL = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}/pdf.worker.min.js`;
 let pdfJsLoadPromise = null;
 function loadPdfJs() {
-    if (isPdfJsReady(window))
-        return Promise.resolve(window.pdfjsLib);
-    if (pdfJsLoadPromise)
-        return pdfJsLoadPromise;
-    pdfJsLoadPromise = new Promise((resolve, reject) => {
-        const script = document.createElement("script");
-        script.src = PDFJS_SCRIPT_URL;
-        const timeoutId = setTimeout(() => {
-            pdfJsLoadPromise = null;
-            reject(new Error("The PDF reader took too long to load — check your connection and try again."));
-        }, 20000);
-        script.onload = () => {
-            clearTimeout(timeoutId);
-            if (!isPdfJsReady(window)) {
-                pdfJsLoadPromise = null;
-                reject(new Error("The PDF reader library loaded but isn't available in the expected form — please try again."));
-                return;
-            }
-            window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
-            resolve(window.pdfjsLib);
-        };
-        script.onerror = () => {
-            clearTimeout(timeoutId);
-            pdfJsLoadPromise = null;
-            reject(new Error("Couldn't load the PDF reader — check your connection and try again."));
-        };
-        document.head.appendChild(script);
-    });
-    return pdfJsLoadPromise;
+  if (isPdfJsReady(window)) return Promise.resolve(window.pdfjsLib);
+  if (pdfJsLoadPromise) return pdfJsLoadPromise;
+  pdfJsLoadPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = PDFJS_SCRIPT_URL;
+    const timeoutId = setTimeout(() => {
+      pdfJsLoadPromise = null;
+      reject(new Error("The PDF reader took too long to load — check your connection and try again."));
+    }, 20000);
+    script.onload = () => {
+      clearTimeout(timeoutId);
+      if (!isPdfJsReady(window)) {
+        pdfJsLoadPromise = null;
+        reject(new Error("The PDF reader library loaded but isn't available in the expected form — please try again."));
+        return;
+      }
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
+      resolve(window.pdfjsLib);
+    };
+    script.onerror = () => {
+      clearTimeout(timeoutId);
+      pdfJsLoadPromise = null;
+      reject(new Error("Couldn't load the PDF reader — check your connection and try again."));
+    };
+    document.head.appendChild(script);
+  });
+  return pdfJsLoadPromise;
 }
+
 // Extracts plain text page by page with a heading per page break — an
 // honest text-extraction import, not a layout-preserving one (columns
 // and tables aren't reconstructed). includeImages renders each page
 // to a real raster image too (PDF.js's standard render-to-canvas),
 // kept opt-in since every page is real extra time and storage.
 async function extractTextFromPdfFile(file, includeImages) {
-    const pdfjsLib = await loadPdfJs();
-    const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-    const parts = [];
-    const pageImages = [];
-    for (let i = 1; i <= pdf.numPages; i++) {
-        const page = await pdf.getPage(i);
-        const textContent = await page.getTextContent();
-        const pageText = textContent.items.map((item) => item.str).join(" ").trim();
-        if (pageText) {
-            parts.push(`<h4>Page ${i}</h4>`);
-            parts.push(`<p>${escapeHTML(pageText)}</p>`);
-        }
-        if (includeImages) {
-            const viewport = page.getViewport({ scale: 1.5 });
-            const canvas = document.createElement("canvas");
-            canvas.width = viewport.width;
-            canvas.height = viewport.height;
-            await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
-            pageImages.push({ pageNum: i, dataUrl: canvas.toDataURL("image/png") });
-        }
+  const pdfjsLib = await loadPdfJs();
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({
+    data: arrayBuffer
+  }).promise;
+  const parts = [];
+  const pageImages = [];
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const textContent = await page.getTextContent();
+    const pageText = textContent.items.map(item => item.str).join(" ").trim();
+    if (pageText) {
+      parts.push(`<h4>Page ${i}</h4>`);
+      parts.push(`<p>${escapeHTML(pageText)}</p>`);
     }
-    return { pageCount: pdf.numPages, contentHTML: parts.join("\n"), pageImages };
+    if (includeImages) {
+      const viewport = page.getViewport({
+        scale: 1.5
+      });
+      const canvas = document.createElement("canvas");
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      await page.render({
+        canvasContext: canvas.getContext("2d"),
+        viewport
+      }).promise;
+      pageImages.push({
+        pageNum: i,
+        dataUrl: canvas.toDataURL("image/png")
+      });
+    }
+  }
+  return {
+    pageCount: pdf.numPages,
+    contentHTML: parts.join("\n"),
+    pageImages
+  };
 }
+
 // Wraps the raw extraction into a real Brainly note: page images are
 // embedded inline as <img> tags (this editor's own convention) AND
 // added to the note's separate images[] array, matching how
@@ -814,16 +691,20 @@ async function extractTextFromPdfFile(file, includeImages) {
 // what drives the note-card thumbnail preview in the library list, so
 // skipping it would mean a PDF import never shows a thumbnail there.
 function buildBrainlyNoteFromPdf(extracted, filename) {
-    const title = (filename || "Untitled PDF").replace(/\.pdf$/i, "");
-    const images = extracted.pageImages.map((p) => ({ id: uid(), dataUrl: p.dataUrl }));
-    const imageHTML = images.map((img) => `<img src="${escapeAttr(img.dataUrl)}" class="rte-inline-image" alt="Page image" />`).join("\n");
-    return {
-        title,
-        bodyHTML: [extracted.contentHTML, imageHTML].filter(Boolean).join("\n") || "<p></p>",
-        images,
-        tagNames: ["pdf"],
-    };
+  const title = (filename || "Untitled PDF").replace(/\.pdf$/i, "");
+  const images = extracted.pageImages.map(p => ({
+    id: uid(),
+    dataUrl: p.dataUrl
+  }));
+  const imageHTML = images.map(img => `<img src="${escapeAttr(img.dataUrl)}" class="rte-inline-image" alt="Page image" />`).join("\n");
+  return {
+    title,
+    bodyHTML: [extracted.contentHTML, imageHTML].filter(Boolean).join("\n") || "<p></p>",
+    images,
+    tagNames: ["pdf"]
+  };
 }
+
 // .md file import (Obsidian/Notion exports) — the real conversion work
 // is already done by parsePastedMarkdownToHTML (marked, loaded via
 // CDN, the same real parser the paste-fix uses), so this is mostly
@@ -836,44 +717,40 @@ function buildBrainlyNoteFromPdf(extracted, filename) {
 // pulled out into the separate images[] array too, matching how PDF
 // import already populates it, so the note-card thumbnail preview
 // works consistently regardless of which import path produced a note.
-const ARTICLE_PROXIES = [
-    (url) => "https://api.allorigins.win/raw?url=" + encodeURIComponent(url),
-    (url) => "https://api.codetabs.com/v1/proxy?quest=" + encodeURIComponent(url),
-    (url) => "https://corsproxy.io/?url=" + encodeURIComponent(url),
-];
+const ARTICLE_PROXIES = [url => "https://api.allorigins.win/raw?url=" + encodeURIComponent(url), url => "https://api.codetabs.com/v1/proxy?quest=" + encodeURIComponent(url), url => "https://corsproxy.io/?url=" + encodeURIComponent(url)];
+
 // A handful of telltale signs the proxy actually returned a bot-
 // challenge or block page instead of the real article — not a
 // substitute for a real check, but enough to give an honest "this site
 // is blocking automated access" message instead of silently treating
 // challenge-page boilerplate as if it were the article itself.
 function looksLikeBlockPage(html) {
-    if (html.length < 500)
-        return true;
-    const lower = html.slice(0, 3000).toLowerCase();
-    return ["captcha", "cf-browser-verification", "access denied", "checking your browser", "attention required"].some((s) => lower.includes(s));
+  if (html.length < 500) return true;
+  const lower = html.slice(0, 3000).toLowerCase();
+  return ["captcha", "cf-browser-verification", "access denied", "checking your browser", "attention required"].some(s => lower.includes(s));
 }
 async function fetchArticleHTMLWithFallbacks(url) {
-    let lastError = "Couldn't reach any proxy";
-    for (const buildProxyUrl of ARTICLE_PROXIES) {
-        try {
-            const response = await fetch(buildProxyUrl(url));
-            if (!response.ok) {
-                lastError = "Proxy returned an error (status " + response.status + ")";
-                continue;
-            }
-            const html = await response.text();
-            if (looksLikeBlockPage(html)) {
-                lastError = "This site appears to be blocking automated access";
-                continue;
-            }
-            return html;
-        }
-        catch (e) {
-            lastError = "Network error reaching the proxy";
-        }
+  let lastError = "Couldn't reach any proxy";
+  for (const buildProxyUrl of ARTICLE_PROXIES) {
+    try {
+      const response = await fetch(buildProxyUrl(url));
+      if (!response.ok) {
+        lastError = "Proxy returned an error (status " + response.status + ")";
+        continue;
+      }
+      const html = await response.text();
+      if (looksLikeBlockPage(html)) {
+        lastError = "This site appears to be blocking automated access";
+        continue;
+      }
+      return html;
+    } catch (e) {
+      lastError = "Network error reaching the proxy";
     }
-    throw new Error(lastError);
+  }
+  throw new Error(lastError);
 }
+
 // Tags kept in the extracted content — everything else is unwrapped
 // (its children promoted up, text preserved) rather than deleted, so
 // stray formatting inside a disallowed wrapper doesn't just vanish.
@@ -881,95 +758,109 @@ const ARTICLE_ALLOWED_TAGS = new Set(["P", "H1", "H2", "H3", "H4", "BLOCKQUOTE",
 const ARTICLE_STRIP_SELECTORS = "script, style, nav, header, footer, aside, noscript, iframe, form, svg";
 const ARTICLE_SEMANTIC_SELECTORS = ["article", "[role='main']", "main", ".post-content", ".article-content", ".entry-content", "#content"];
 function cleanExtractedElement(contentEl) {
-    Array.from(contentEl.querySelectorAll("*")).forEach((el) => {
-        if (!ARTICLE_ALLOWED_TAGS.has(el.tagName)) {
-            el.replaceWith(...el.childNodes);
-        }
-        else {
-            Array.from(el.attributes).forEach((attr) => {
-                if (!(el.tagName === "A" && attr.name === "href"))
-                    el.removeAttribute(attr.name);
-            });
-        }
-    });
+  Array.from(contentEl.querySelectorAll("*")).forEach(el => {
+    if (!ARTICLE_ALLOWED_TAGS.has(el.tagName)) {
+      el.replaceWith(...el.childNodes);
+    } else {
+      Array.from(el.attributes).forEach(attr => {
+        if (!(el.tagName === "A" && attr.name === "href")) el.removeAttribute(attr.name);
+      });
+    }
+  });
 }
 function extractArticleContent(html) {
-    const doc = new DOMParser().parseFromString(html, "text/html");
-    doc.querySelectorAll(ARTICLE_STRIP_SELECTORS).forEach((el) => el.remove());
-    const titleEl = doc.querySelector("h1") || doc.querySelector("title");
-    const title = titleEl ? titleEl.textContent.trim() : "";
-    let contentEl = null;
-    for (const sel of ARTICLE_SEMANTIC_SELECTORS) {
-        const found = doc.querySelector(sel);
-        if (found && found.textContent.trim().length > 200) {
-            contentEl = found;
-            break;
-        }
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  doc.querySelectorAll(ARTICLE_STRIP_SELECTORS).forEach(el => el.remove());
+  const titleEl = doc.querySelector("h1") || doc.querySelector("title");
+  const title = titleEl ? titleEl.textContent.trim() : "";
+  let contentEl = null;
+  for (const sel of ARTICLE_SEMANTIC_SELECTORS) {
+    const found = doc.querySelector(sel);
+    if (found && found.textContent.trim().length > 200) {
+      contentEl = found;
+      break;
     }
-    // No semantic container found — fall back to scoring every div/section
-    // by how much actual paragraph text it contains, and taking the best.
-    if (!contentEl) {
-        let bestScore = 0;
-        doc.querySelectorAll("div, section").forEach((el) => {
-            const textLen = Array.from(el.querySelectorAll("p")).reduce((sum, p) => sum + p.textContent.length, 0);
-            if (textLen > bestScore) {
-                bestScore = textLen;
-                contentEl = el;
-            }
-        });
+  }
+
+  // No semantic container found — fall back to scoring every div/section
+  // by how much actual paragraph text it contains, and taking the best.
+  if (!contentEl) {
+    let bestScore = 0;
+    doc.querySelectorAll("div, section").forEach(el => {
+      const textLen = Array.from(el.querySelectorAll("p")).reduce((sum, p) => sum + p.textContent.length, 0);
+      if (textLen > bestScore) {
+        bestScore = textLen;
+        contentEl = el;
+      }
+    });
+  }
+
+  // Last resort — neither a semantic container nor a clear "best" div
+  // was found. Rather than give up, grab every <p> on the whole page in
+  // document order and treat that as the article. More permissive and
+  // less precise than the two paths above, but a real result beats an
+  // empty one when the page's structure doesn't match common patterns.
+  if (!contentEl || contentEl.textContent.trim().length < 100) {
+    const allParagraphs = Array.from(doc.querySelectorAll("p")).filter(p => p.textContent.trim().length > 40);
+    if (allParagraphs.length >= 3) {
+      const wrapper = doc.createElement("div");
+      allParagraphs.forEach(p => wrapper.appendChild(p.cloneNode(true)));
+      contentEl = wrapper;
     }
-    // Last resort — neither a semantic container nor a clear "best" div
-    // was found. Rather than give up, grab every <p> on the whole page in
-    // document order and treat that as the article. More permissive and
-    // less precise than the two paths above, but a real result beats an
-    // empty one when the page's structure doesn't match common patterns.
-    if (!contentEl || contentEl.textContent.trim().length < 100) {
-        const allParagraphs = Array.from(doc.querySelectorAll("p")).filter((p) => p.textContent.trim().length > 40);
-        if (allParagraphs.length >= 3) {
-            const wrapper = doc.createElement("div");
-            allParagraphs.forEach((p) => wrapper.appendChild(p.cloneNode(true)));
-            contentEl = wrapper;
-        }
-    }
-    if (!contentEl || contentEl.textContent.trim().length < 100)
-        return null;
-    cleanExtractedElement(contentEl);
-    return { title, contentHTML: contentEl.innerHTML };
+  }
+  if (!contentEl || contentEl.textContent.trim().length < 100) return null;
+  cleanExtractedElement(contentEl);
+  return {
+    title,
+    contentHTML: contentEl.innerHTML
+  };
 }
+
 // Orchestrates fetch + extraction, returning an explicit
 // { status: "success" | "failed", ... } result rather than silently
 // succeeding or failing — the caller uses this to actually show
 // something (a clear failure message with a retry option, not nothing
 // at all, which is what shipped before this).
 async function tryExtractFullArticle(url) {
-    let html;
-    try {
-        html = await fetchArticleHTMLWithFallbacks(url);
-    }
-    catch (e) {
-        return { status: "failed", reason: e.message || "Couldn't fetch that page" };
-    }
-    const extracted = extractArticleContent(html);
-    if (!extracted) {
-        return { status: "failed", reason: "Fetched the page, but couldn't find article content in it" };
-    }
-    return { status: "success", title: extracted.title, contentHTML: extracted.contentHTML };
+  let html;
+  try {
+    html = await fetchArticleHTMLWithFallbacks(url);
+  } catch (e) {
+    return {
+      status: "failed",
+      reason: e.message || "Couldn't fetch that page"
+    };
+  }
+  const extracted = extractArticleContent(html);
+  if (!extracted) {
+    return {
+      status: "failed",
+      reason: "Fetched the page, but couldn't find article content in it"
+    };
+  }
+  return {
+    status: "success",
+    title: extracted.title,
+    contentHTML: extracted.contentHTML
+  };
 }
+
 // Wraps a successful extraction into a real Brainly note. Brainly's
 // note schema has no dedicated "source URL" field (unlike Captura's
 // capture.source) — rather than add one and touch the schema
 // everything else depends on, the source link becomes the note's own
 // first line, a plain, permanent part of the body content itself.
 function buildBrainlyNoteFromArticle(url, extracted) {
-    const title = extracted.title || url;
-    const sourceLine = `<p><a href="${escapeAttr(url)}">${escapeHTML(url)}</a></p>`;
-    return {
-        title,
-        bodyHTML: [sourceLine, extracted.contentHTML].filter(Boolean).join("\n"),
-        images: [],
-        tagNames: ["article"],
-    };
+  const title = extracted.title || url;
+  const sourceLine = `<p><a href="${escapeAttr(url)}">${escapeHTML(url)}</a></p>`;
+  return {
+    title,
+    bodyHTML: [sourceLine, extracted.contentHTML].filter(Boolean).join("\n"),
+    images: [],
+    tagNames: ["article"]
+  };
 }
+
 // Handles the manual "share fields" shape (title/text/url) that both
 // a share-target handoff and a manual "paste a link" entry ultimately
 // reduce to. If text is itself just a bare URL, treat it as the URL
@@ -977,94 +868,120 @@ function buildBrainlyNoteFromArticle(url, extracted) {
 // than saving a note whose only content is a URL string sitting where
 // body text would go.
 function resolveShareFields(title, text, url) {
-    const trimmedText = (text || "").trim();
-    const textIsJustAUrl = /^https?:\/\/\S+$/i.test(trimmedText);
-    const resolvedUrl = url || (textIsJustAUrl ? trimmedText : "");
-    const resolvedText = textIsJustAUrl ? "" : trimmedText;
-    return { title: title || "", text: resolvedText, url: resolvedUrl };
+  const trimmedText = (text || "").trim();
+  const textIsJustAUrl = /^https?:\/\/\S+$/i.test(trimmedText);
+  const resolvedUrl = url || (textIsJustAUrl ? trimmedText : "");
+  const resolvedText = textIsJustAUrl ? "" : trimmedText;
+  return {
+    title: title || "",
+    text: resolvedText,
+    url: resolvedUrl
+  };
 }
 function buildBrainlyNoteFromMarkdownFile(text, filename) {
-    const lines = text.replace(/\r\n/g, "\n").split("\n");
-    let title = (filename || "Untitled").replace(/\.md$/i, "");
-    let bodyText = text;
-    const firstNonEmpty = lines.find((l) => l.trim());
-    if (firstNonEmpty && /^#\s+\S/.test(firstNonEmpty.trim())) {
-        title = firstNonEmpty.trim().replace(/^#\s+/, "");
-        bodyText = lines.slice(lines.indexOf(firstNonEmpty) + 1).join("\n");
-    }
-    const bodyHTML = parsePastedMarkdownToHTML(bodyText);
-    const images = [];
-    const imgRegex = /<img[^>]*src="(data:[^"]+)"[^>]*>/g;
-    let m;
-    while ((m = imgRegex.exec(bodyHTML)))
-        images.push({ id: uid(), dataUrl: m[1] });
-    return { title, bodyHTML, images, tagNames: ["imported"] };
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  let title = (filename || "Untitled").replace(/\.md$/i, "");
+  let bodyText = text;
+  const firstNonEmpty = lines.find(l => l.trim());
+  if (firstNonEmpty && /^#\s+\S/.test(firstNonEmpty.trim())) {
+    title = firstNonEmpty.trim().replace(/^#\s+/, "");
+    bodyText = lines.slice(lines.indexOf(firstNonEmpty) + 1).join("\n");
+  }
+  const bodyHTML = parsePastedMarkdownToHTML(bodyText);
+  const images = [];
+  const imgRegex = /<img[^>]*src="(data:[^"]+)"[^>]*>/g;
+  let m;
+  while (m = imgRegex.exec(bodyHTML)) images.push({
+    id: uid(),
+    dataUrl: m[1]
+  });
+  return {
+    title,
+    bodyHTML,
+    images,
+    tagNames: ["imported"]
+  };
 }
 const KINDLE_TO_NOTE_HIGHLIGHT_COLOR = {
-    yellow: "yellow",
-    green: "green",
-    blue: "green",
-    aqua: "green",
-    orange: "red",
-    red: "red",
-    pink: "red",
-    purple: "red",
+  yellow: "yellow",
+  green: "green",
+  blue: "green",
+  aqua: "green",
+  orange: "red",
+  red: "red",
+  pink: "red",
+  purple: "red"
 };
 function parseKindleNotebookHTML(html) {
-    const titleMatch = html.match(/<div class="bookTitle">\s*([\s\S]*?)\s*<\/div>/);
-    const title = titleMatch ? decodeHtmlEntitiesKindle(stripHtmlTagsKindle(titleMatch[1]).trim()) : null;
-    const authorMatch = html.match(/<div class="authors">\s*([\s\S]*?)\s*<\/div>/);
-    const author = authorMatch ? decodeHtmlEntitiesKindle(stripHtmlTagsKindle(authorMatch[1]).trim()) : null;
-    const blockRegex = /<div class="(sectionHeading|noteHeading|noteText)">([\s\S]*?)<\/div>/g;
-    const blocks = [];
-    let m;
-    while ((m = blockRegex.exec(html))) {
-        blocks.push({ type: m[1], raw: m[2] });
+  const titleMatch = html.match(/<div class="bookTitle">\s*([\s\S]*?)\s*<\/div>/);
+  const title = titleMatch ? decodeHtmlEntitiesKindle(stripHtmlTagsKindle(titleMatch[1]).trim()) : null;
+  const authorMatch = html.match(/<div class="authors">\s*([\s\S]*?)\s*<\/div>/);
+  const author = authorMatch ? decodeHtmlEntitiesKindle(stripHtmlTagsKindle(authorMatch[1]).trim()) : null;
+  const blockRegex = /<div class="(sectionHeading|noteHeading|noteText)">([\s\S]*?)<\/div>/g;
+  const blocks = [];
+  let m;
+  while (m = blockRegex.exec(html)) {
+    blocks.push({
+      type: m[1],
+      raw: m[2]
+    });
+  }
+  const entries = [];
+  let currentSection = null;
+  let i = 0;
+  while (i < blocks.length) {
+    const block = blocks[i];
+    if (block.type === "sectionHeading") {
+      currentSection = decodeHtmlEntitiesKindle(stripHtmlTagsKindle(block.raw).trim());
+      i += 1;
+      continue;
     }
-    const entries = [];
-    let currentSection = null;
-    let i = 0;
-    while (i < blocks.length) {
-        const block = blocks[i];
-        if (block.type === "sectionHeading") {
-            currentSection = decodeHtmlEntitiesKindle(stripHtmlTagsKindle(block.raw).trim());
-            i += 1;
-            continue;
-        }
-        if (block.type === "noteHeading") {
-            const headingText = stripHtmlTagsKindle(block.raw);
-            const isNote = /^\s*Note\b/i.test(headingText);
-            const colorMatch = headingText.match(/\(([a-z]+)\)/i);
-            const color = colorMatch ? colorMatch[1].toLowerCase() : null;
-            const pageMatch = headingText.match(/Page\s+(\d+)/i);
-            const page = pageMatch ? pageMatch[1] : null;
-            const textBlock = blocks[i + 1];
-            const text = textBlock && textBlock.type === "noteText" ? decodeHtmlEntitiesKindle(stripHtmlTagsKindle(textBlock.raw).trim()) : "";
-            entries.push({ isNote, color, page, text, section: currentSection });
-            i += textBlock && textBlock.type === "noteText" ? 2 : 1;
-            continue;
-        }
-        i += 1; // an unpaired/unexpected block — skip rather than loop forever
+    if (block.type === "noteHeading") {
+      const headingText = stripHtmlTagsKindle(block.raw);
+      const isNote = /^\s*Note\b/i.test(headingText);
+      const colorMatch = headingText.match(/\(([a-z]+)\)/i);
+      const color = colorMatch ? colorMatch[1].toLowerCase() : null;
+      const pageMatch = headingText.match(/Page\s+(\d+)/i);
+      const page = pageMatch ? pageMatch[1] : null;
+      const textBlock = blocks[i + 1];
+      const text = textBlock && textBlock.type === "noteText" ? decodeHtmlEntitiesKindle(stripHtmlTagsKindle(textBlock.raw).trim()) : "";
+      entries.push({
+        isNote,
+        color,
+        page,
+        text,
+        section: currentSection
+      });
+      i += textBlock && textBlock.type === "noteText" ? 2 : 1;
+      continue;
     }
-    // A "Note" entry immediately following a "Highlight" entry on the
-    // SAME page is attached to it as a linked note, matching this app's
-    // own highlight+note structure — rather than kept as a disconnected
-    // standalone entry. Anything that doesn't fit that pattern (a note
-    // with no preceding highlight, or on a different page) stays
-    // standalone, same as a genuinely freestanding margin note.
-    const merged = [];
-    for (const e of entries) {
-        if (e.isNote) {
-            const prev = merged.length ? merged[merged.length - 1] : null;
-            if (prev && !prev.isNote && prev.page === e.page && !prev.linkedNote && e.text) {
-                prev.linkedNote = e.text;
-                continue;
-            }
-        }
-        merged.push(e);
+    i += 1; // an unpaired/unexpected block — skip rather than loop forever
+  }
+
+  // A "Note" entry immediately following a "Highlight" entry on the
+  // SAME page is attached to it as a linked note, matching this app's
+  // own highlight+note structure — rather than kept as a disconnected
+  // standalone entry. Anything that doesn't fit that pattern (a note
+  // with no preceding highlight, or on a different page) stays
+  // standalone, same as a genuinely freestanding margin note.
+  const merged = [];
+  for (const e of entries) {
+    if (e.isNote) {
+      const prev = merged.length ? merged[merged.length - 1] : null;
+      if (prev && !prev.isNote && prev.page === e.page && !prev.linkedNote && e.text) {
+        prev.linkedNote = e.text;
+        continue;
+      }
     }
-    return { title, author, entries: merged };
+    merged.push(e);
+  }
+  return {
+    title,
+    author,
+    entries: merged
+  };
 }
+
 // Turns a parsed Notebook into one Brainly note: chapter/section
 // headings become <h3> markers within the note body, each highlighted
 // passage becomes an inline <mark class="note-highlight-*"> — this
@@ -1075,29 +992,29 @@ function parseKindleNotebookHTML(html) {
 // Kindle note (no preceding highlight) becomes its own plain
 // paragraph too.
 function buildBrainlyNoteFromKindleNotebook(parsed) {
-    const bodyParts = [];
-    let lastSection = null;
-    parsed.entries.forEach((e) => {
-        if (e.section && e.section !== lastSection) {
-            bodyParts.push(`<h3>${escapeHTML(e.section)}</h3>`);
-            lastSection = e.section;
-        }
-        if (e.isNote) {
-            bodyParts.push(`<p>${escapeHTML(e.text)}</p>`);
-            return;
-        }
-        const noteColor = e.color && KINDLE_TO_NOTE_HIGHLIGHT_COLOR[e.color] ? KINDLE_TO_NOTE_HIGHLIGHT_COLOR[e.color] : "yellow";
-        bodyParts.push(`<p><mark class="note-highlight note-highlight-${noteColor}">${escapeHTML(e.text)}</mark></p>`);
-        if (e.linkedNote)
-            bodyParts.push(`<p>${escapeHTML(e.linkedNote)}</p>`);
-    });
-    return {
-        title: parsed.title || "Untitled",
-        bodyHTML: bodyParts.join("\n") || "<p></p>",
-        images: [],
-        tagNames: ["kindle"],
-    };
+  const bodyParts = [];
+  let lastSection = null;
+  parsed.entries.forEach(e => {
+    if (e.section && e.section !== lastSection) {
+      bodyParts.push(`<h3>${escapeHTML(e.section)}</h3>`);
+      lastSection = e.section;
+    }
+    if (e.isNote) {
+      bodyParts.push(`<p>${escapeHTML(e.text)}</p>`);
+      return;
+    }
+    const noteColor = e.color && KINDLE_TO_NOTE_HIGHLIGHT_COLOR[e.color] ? KINDLE_TO_NOTE_HIGHLIGHT_COLOR[e.color] : "yellow";
+    bodyParts.push(`<p><mark class="note-highlight note-highlight-${noteColor}">${escapeHTML(e.text)}</mark></p>`);
+    if (e.linkedNote) bodyParts.push(`<p>${escapeHTML(e.linkedNote)}</p>`);
+  });
+  return {
+    title: parsed.title || "Untitled",
+    bodyHTML: bodyParts.join("\n") || "<p></p>",
+    images: [],
+    tagNames: ["kindle"]
+  };
 }
+
 // The plain-text My Clippings.txt path — no color information exists
 // in that format at all (Kindle's own device export doesn't record
 // it), so every highlight uses the default "yellow" (general) color
@@ -1106,67 +1023,59 @@ function buildBrainlyNoteFromKindleNotebook(parsed) {
 // one Brainly note per book, matching the Notebook import's own
 // "one book, one note" shape, not one note per individual highlight.
 function buildBrainlyNotesFromKindleClippings(entries) {
-    const byTitle = new Map();
-    entries.forEach((e) => {
-        const key = e.title || "Untitled";
-        if (!byTitle.has(key))
-            byTitle.set(key, { title: key, author: e.author, items: [] });
-        byTitle.get(key).items.push(e);
+  const byTitle = new Map();
+  entries.forEach(e => {
+    const key = e.title || "Untitled";
+    if (!byTitle.has(key)) byTitle.set(key, {
+      title: key,
+      author: e.author,
+      items: []
     });
-    return Array.from(byTitle.values()).map((book) => {
-        const bodyParts = book.items.map((e) => {
-            if (e.type === "NOTE")
-                return `<p>${escapeHTML(e.content || "")}</p>`;
-            return `<p><mark class="note-highlight note-highlight-yellow">${escapeHTML(e.content || "")}</mark></p>`;
-        });
-        return {
-            title: book.title,
-            bodyHTML: bodyParts.join("\n") || "<p></p>",
-            images: [],
-            tagNames: ["kindle"],
-        };
+    byTitle.get(key).items.push(e);
+  });
+  return Array.from(byTitle.values()).map(book => {
+    const bodyParts = book.items.map(e => {
+      if (e.type === "NOTE") return `<p>${escapeHTML(e.content || "")}</p>`;
+      return `<p><mark class="note-highlight note-highlight-yellow">${escapeHTML(e.content || "")}</mark></p>`;
     });
+    return {
+      title: book.title,
+      bodyHTML: bodyParts.join("\n") || "<p></p>",
+      images: [],
+      tagNames: ["kindle"]
+    };
+  });
 }
+
 // ---------- Note <-> export helpers ----------
+
 function noteToMarkdown(note, subjectName, tagNames) {
-    const lines = [
-        `# ${note.title || "Untitled"}`,
-        "",
-        `**Subject:** ${subjectName || "—"}`,
-        tagNames.length ? `**Tags:** ${tagNames.map((t) => `#${slug(t)}`).join(" ")}` : null,
-        `**Saved:** ${formatDate(note.createdAt)}`,
-        "",
-        "---",
-        "",
-        htmlToPlainText(note.bodyHTML),
-    ].filter((l) => l !== null);
-    if (note.images && note.images.length) {
-        lines.push("");
-        note.images.forEach((img, i) => lines.push(`![image ${i + 1}](${img.dataUrl})`));
-    }
-    return lines.join("\n");
+  const lines = [`# ${note.title || "Untitled"}`, "", `**Subject:** ${subjectName || "—"}`, tagNames.length ? `**Tags:** ${tagNames.map(t => `#${slug(t)}`).join(" ")}` : null, `**Saved:** ${formatDate(note.createdAt)}`, "", "---", "", htmlToPlainText(note.bodyHTML)].filter(l => l !== null);
+  if (note.images && note.images.length) {
+    lines.push("");
+    note.images.forEach((img, i) => lines.push(`![image ${i + 1}](${img.dataUrl})`));
+  }
+  return lines.join("\n");
 }
 function cardsToSeparatorText(cards, termSep, cardSep) {
-    return cards.map((c) => `${c.frontImage ? "[image]" : c.front}${termSep}${c.back}`).join(cardSep);
+  return cards.map(c => `${c.frontImage ? "[image]" : c.front}${termSep}${c.back}`).join(cardSep);
 }
 function parseSeparatorText(text, termSep, cardSep) {
-    const normalized = text.replace(/\r\n/g, "\n");
-    const rows = normalized.split(cardSep);
-    return rows
-        .map((row) => row.trim())
-        .filter(Boolean)
-        .map((row) => {
-        const idx = row.indexOf(termSep);
-        if (idx === -1)
-            return null;
-        const front = row.slice(0, idx).trim();
-        const back = row.slice(idx + termSep.length).trim();
-        if (!front || !back)
-            return null;
-        return { front, back };
-    })
-        .filter(Boolean);
+  const normalized = text.replace(/\r\n/g, "\n");
+  const rows = normalized.split(cardSep);
+  return rows.map(row => row.trim()).filter(Boolean).map(row => {
+    const idx = row.indexOf(termSep);
+    if (idx === -1) return null;
+    const front = row.slice(0, idx).trim();
+    const back = row.slice(idx + termSep.length).trim();
+    if (!front || !back) return null;
+    return {
+      front,
+      back
+    };
+  }).filter(Boolean);
 }
+
 // Auto-links flashcards embedded directly in a note. Any line containing
 // " > " (spaces required on both sides) becomes "front > back". Re-syncs
 // on every save: matching fronts keep their box/review history and only
@@ -1175,4001 +1084,5560 @@ function parseSeparatorText(text, termSep, cardSep) {
 // mechanism created (autoFromNote), never a highlighted or imported card
 // that happens to share a source note.
 function syncAutoCardsFromNote(allCards, noteId, subjectId, bodyHTML, htmlToPlainTextFn, nowFn, uidFn) {
-    const plainText = htmlToPlainTextFn(bodyHTML);
-    const parsed = parseSeparatorText(plainText, "::", "\n");
-    const now = nowFn();
-    const existingAuto = allCards.filter((c) => c.autoFromNote && (c.sourceNoteIds || []).includes(noteId));
-    const keptIds = new Set();
-    let cards = allCards.map((c) => {
-        if (!c.autoFromNote || !(c.sourceNoteIds || []).includes(noteId))
-            return c;
-        const match = parsed.find((p) => p.front === c.front);
-        if (!match)
-            return c; // filtered out below
-        keptIds.add(c.id);
-        if (match.back !== c.back)
-            return { ...c, back: match.back };
-        return c;
-    });
-    cards = cards.filter((c) => {
-        if (!c.autoFromNote || !(c.sourceNoteIds || []).includes(noteId))
-            return true;
-        return keptIds.has(c.id);
-    });
-    const newCards = parsed
-        .filter((p) => !existingAuto.some((c) => c.front === p.front))
-        .map((p) => ({
-        id: uidFn(),
-        subjectId,
-        front: p.front,
-        back: p.back,
-        sourceNoteIds: [noteId],
-        autoFromNote: true,
-        box: 1,
-        dueDate: now,
-        starred: false,
-        timesCorrect: 0,
-        timesWrong: 0,
-        createdAt: now,
-    }));
-    return {
-        cards: [...cards, ...newCards],
-        addedCount: newCards.length,
-        removedCount: existingAuto.length - keptIds.size,
+  const plainText = htmlToPlainTextFn(bodyHTML);
+  const parsed = parseSeparatorText(plainText, "::", "\n");
+  const now = nowFn();
+  const existingAuto = allCards.filter(c => c.autoFromNote && (c.sourceNoteIds || []).includes(noteId));
+  const keptIds = new Set();
+  let cards = allCards.map(c => {
+    if (!c.autoFromNote || !(c.sourceNoteIds || []).includes(noteId)) return c;
+    const match = parsed.find(p => p.front === c.front);
+    if (!match) return c; // filtered out below
+    keptIds.add(c.id);
+    if (match.back !== c.back) return {
+      ...c,
+      back: match.back
     };
+    return c;
+  });
+  cards = cards.filter(c => {
+    if (!c.autoFromNote || !(c.sourceNoteIds || []).includes(noteId)) return true;
+    return keptIds.has(c.id);
+  });
+  const newCards = parsed.filter(p => !existingAuto.some(c => c.front === p.front)).map(p => ({
+    id: uidFn(),
+    subjectId,
+    front: p.front,
+    back: p.back,
+    sourceNoteIds: [noteId],
+    autoFromNote: true,
+    box: 1,
+    dueDate: now,
+    starred: false,
+    timesCorrect: 0,
+    timesWrong: 0,
+    createdAt: now
+  }));
+  return {
+    cards: [...cards, ...newCards],
+    addedCount: newCards.length,
+    removedCount: existingAuto.length - keptIds.size
+  };
 }
+
 // ---------- Main App ----------
+
 function Brainly() {
-    const [data, setData] = useState({ subjects: [], tags: [], notes: [], cards: [] });
-    const [ready, setReady] = useState(false);
-    const [saveError, setSaveError] = useState(false);
-    const [selectedSubjectId, setSelectedSubjectId] = useState(null);
-    const [selectedTagIds, setSelectedTagIds] = useState([]);
-    const [query, setQuery] = useState("");
-    const [tab, setTab] = useState("notes"); // "notes" | "study"
-    const [showNewSubject, setShowNewSubject] = useState(false);
-    const [newSubjectName, setNewSubjectName] = useState("");
-    const [newSubjectColor, setNewSubjectColor] = useState(SUBJECT_COLORS[0].hex);
-    const [newSubjectParentId, setNewSubjectParentId] = useState(null);
-    const [editingNote, setEditingNote] = useState(null); // null closed, {} new, note = editing
-    const [editingCard, setEditingCard] = useState(null);
-    const [confirmDialog, setConfirmDialog] = useState(null);
-    const [toast, setToast] = useState(null);
-    const [showImportCards, setShowImportCards] = useState(false);
-    const [showReview, setShowReview] = useState(false);
-    const [showMatch, setShowMatch] = useState(false);
-    const [showOcclusion, setShowOcclusion] = useState(false);
-    const [occlusionSeedImage, setOcclusionSeedImage] = useState(null); // dataUrl | null — prefills from a note image
-    const [occlusionSourceNoteId, setOcclusionSourceNoteId] = useState(null); // link resulting cards back to a note
-    const [studyScope, setStudyScope] = useState("due"); // "due" | "starred" | "all" | "selected"
-    const [selectedNoteFilter, setSelectedNoteFilter] = useState(null); // note id | null
-    const [manualSelectedCardIds, setManualSelectedCardIds] = useState(() => new Set());
-    const [crossTagSession, setCrossTagSession] = useState(null); // { tagName, cards } | null — overrides studyCards when set
-    const [noteSelectMode, setNoteSelectMode] = useState(false);
-    const [selectedNoteIdsForBulk, setSelectedNoteIdsForBulk] = useState(() => new Set());
-    const [showBulkTag, setShowBulkTag] = useState(false);
-    const [showBulkMove, setShowBulkMove] = useState(false);
-    const [lightboxImage, setLightboxImage] = useState(null); // dataUrl | null
-    const [driveConnected, setDriveConnected] = useState(false);
-    const [driveSyncing, setDriveSyncing] = useState(false);
-    const [driveLastSync, setDriveLastSync] = useState(null); // ISO string | null
-    const [driveError, setDriveError] = useState("");
-    const driveKnownModifiedRef = useRef(null); // last-seen Drive modifiedTime, for conflict detection
-    const driveDebounceRef = useRef(null);
-    const [backupBusy, setBackupBusy] = useState(false);
-    const [deviceExportBusy, setDeviceExportBusy] = useState(false);
-    const [importBusy, setImportBusy] = useState(false);
-    const [kindleImportBusy, setKindleImportBusy] = useState(false);
-    const [pdfImportFile, setPdfImportFile] = useState(null); // picked file, pending the include-images choice
-    const [pdfImportBusy, setPdfImportBusy] = useState(false);
-    const [pdfImportError, setPdfImportError] = useState("");
-    const [mdImportBusy, setMdImportBusy] = useState(false);
-    const [showAddArticle, setShowAddArticle] = useState(false);
-    const [articleImportBusy, setArticleImportBusy] = useState(false);
-    const [articleImportError, setArticleImportError] = useState("");
-    const [subjectImportBusy, setSubjectImportBusy] = useState(false);
-    const [unlocked, setUnlocked] = useState(false);
-    const [showPinModal, setShowPinModal] = useState(null); // "set" | "change" | "remove" | null
-    const [backupMessage, setBackupMessage] = useState("");
-    const [splitPane, setSplitPane] = useState(null); // null | { type: "note", note } | { type: "cards", noteId, subjectId, scope: "note"|"subject" }
-    const [theme, setTheme] = useState("light"); // "light" | "dark"
-    const [remindersOn, setRemindersOn] = useState(false);
-    const [openRouterKey, setOpenRouterKey] = useState("");
-    const [openRouterKeyInput, setOpenRouterKeyInput] = useState("");
-    const [showOpenRouterKey, setShowOpenRouterKey] = useState(false);
-    const [showAskLibrary, setShowAskLibrary] = useState(false);
-    const [libraryAskScope, setLibraryAskScope] = useState("all"); // "all" | a subjectId
-    const [libraryAskQuestion, setLibraryAskQuestion] = useState("");
-    const [libraryAskAnswer, setLibraryAskAnswer] = useState("");
-    const [libraryAskBusy, setLibraryAskBusy] = useState(false);
-    const [libraryAskError, setLibraryAskError] = useState("");
-    const [libraryAskCoverage, setLibraryAskCoverage] = useState(null);
-    const askConfirm = (message, onConfirm, confirmLabel) => setConfirmDialog({ message, onConfirm, confirmLabel });
-    // Load
-    useEffect(() => {
-        (async () => {
-            let loaded = { subjects: [], tags: [], notes: [], cards: [] };
-            try {
-                const res = await storage.get(STORAGE_KEY);
-                if (res && res.value) {
-                    const parsed = JSON.parse(res.value);
-                    loaded = {
-                        subjects: parsed.subjects || [],
-                        tags: parsed.tags || [],
-                        notes: parsed.notes || [],
-                        cards: parsed.cards || [],
-                    };
-                }
-            }
-            catch (e) {
-                // no existing data yet
-            }
-            setData(loaded);
-            try {
-                const themeRes = await storage.get(THEME_KEY);
-                if (themeRes && themeRes.value === "dark")
-                    setTheme("dark");
-            }
-            catch (e) {
-                // default to light
-            }
-            try {
-                const remindersRes = await storage.get(REMINDERS_KEY);
-                if (remindersRes && remindersRes.value === "on" && typeof Notification !== "undefined" && Notification.permission === "granted") {
-                    setRemindersOn(true);
-                }
-            }
-            catch (e) {
-                // default to off
-            }
-            try {
-                const keyRes = await storage.get(OPENROUTER_KEY_STORAGE_KEY);
-                if (keyRes && keyRes.value) {
-                    setOpenRouterKey(keyRes.value);
-                    setOpenRouterKeyInput(keyRes.value);
-                }
-            }
-            catch (e) {
-                // no key saved yet
-            }
-            // Incoming share (Web Share Target): index.html?title=...&text=...&url=...
-            // If a real URL came through, try extracting the full article
-            // first (the actual point of "share like Readwise Reader" — a
-            // readable note, not just a bare link) before falling back to
-            // the plain link/text note this already did. A toast marks the
-            // start since extraction is a real network round-trip and the
-            // rest of the app is already interactive by this point — it
-            // shouldn't look like nothing is happening.
-            try {
-                const params = new URLSearchParams(window.location.search);
-                const sharedTitle = params.get("title");
-                const sharedText = params.get("text");
-                const sharedUrl = params.get("url");
-                if (sharedTitle || sharedText || sharedUrl) {
-                    window.history.replaceState(null, "", window.location.pathname);
-                    const fields = resolveShareFields(sharedTitle, sharedText, sharedUrl);
-                    let articleResult = null;
-                    if (fields.url) {
-                        setTimeout(() => showToast("Saving shared article…"), 50);
-                        articleResult = await tryExtractFullArticle(fields.url);
-                    }
-                    let targetSubject, subjectsNext, noteTitle, noteBodyHTML, toastMessage;
-                    if (articleResult && articleResult.status === "success") {
-                        const noteData = buildBrainlyNoteFromArticle(fields.url, articleResult);
-                        targetSubject = loaded.subjects.find((s) => s.name === "Saved Articles");
-                        subjectsNext = loaded.subjects;
-                        if (!targetSubject) {
-                            targetSubject = { id: uid(), name: "Saved Articles", color: "#2F80ED", parentId: null, createdAt: nowISO() };
-                            subjectsNext = [...loaded.subjects, targetSubject];
-                        }
-                        noteTitle = noteData.title;
-                        noteBodyHTML = noteData.bodyHTML;
-                        toastMessage = `Saved "${noteData.title}"`;
-                    }
-                    else {
-                        // No URL at all (a plain text/title share), or extraction
-                        // failed — same fallback this already had: a "Review"
-                        // note with whatever text/link came through, so a share
-                        // is never just silently lost.
-                        targetSubject = loaded.subjects.find((s) => !s.parentId && s.name.toLowerCase() === "review");
-                        subjectsNext = loaded.subjects;
-                        if (!targetSubject) {
-                            targetSubject = { id: uid(), name: "Review", color: "#F5A623", parentId: null, createdAt: nowISO() };
-                            subjectsNext = [...loaded.subjects, targetSubject];
-                        }
-                        const bodyParts = [];
-                        if (fields.text)
-                            bodyParts.push(`<p>${escapeHTML(fields.text)}</p>`);
-                        if (fields.url)
-                            bodyParts.push(`<p><a href="${escapeHTML(fields.url)}" target="_blank" rel="noopener">${escapeHTML(fields.url)}</a></p>`);
-                        noteTitle = fields.title || fields.url || "Shared note";
-                        noteBodyHTML = bodyParts.join("") || "<p></p>";
-                        toastMessage = fields.url ? "Couldn't extract that article — saved the link instead" : "Saved shared note to Review";
-                    }
-                    const now = nowISO();
-                    const newNote = {
-                        id: uid(),
-                        subjectId: targetSubject.id,
-                        title: noteTitle,
-                        bodyHTML: noteBodyHTML,
-                        tagIds: [],
-                        images: [],
-                        color: null,
-                        linkedNoteIds: [],
-                        createdAt: now,
-                        updatedAt: now,
-                    };
-                    const withShare = { ...loaded, subjects: subjectsNext, notes: [...loaded.notes, newNote] };
-                    setData(withShare);
-                    try {
-                        await storage.set(STORAGE_KEY, JSON.stringify(withShare));
-                    }
-                    catch (e) {
-                        // will still show in this session even if save fails
-                    }
-                    setSelectedSubjectId(targetSubject.id);
-                    setTab("notes");
-                    setTimeout(() => showToast(toastMessage), 50);
-                }
-            }
-            catch (e) {
-                // no incoming share, or URL parsing unsupported — ignore
-            }
-            setReady(true);
-        })();
-    }, []);
-    // Once initial data has loaded, try a silent Drive reconnect if this
-    // device was previously connected — no popup, just resumes if Google
-    // still has an active session and prior consent. If it can't complete
-    // silently, nothing happens; the normal Connect button is still there.
-    useEffect(() => {
-        if (!ready || !driveIsAvailable())
-            return;
-        storage.get(DRIVE_WAS_CONNECTED_KEY).then((res) => {
-            if (res && res.value === "true") {
-                driveRequestAccess(onDriveTokenReceived, { silent: true });
-            }
-        });
-    }, [ready]);
-    // Leaving a subject clears any in-progress bulk note selection.
-    useEffect(() => {
-        setNoteSelectMode(false);
-        setSelectedNoteIdsForBulk(new Set());
-    }, [selectedSubjectId]);
-    const persist = async (next, opts = {}) => {
-        setData(next);
-        try {
-            const res = await storage.set(STORAGE_KEY, JSON.stringify(next));
-            if (!res)
-                throw new Error("no result");
-            setSaveError(false);
+  const [data, setData] = useState({
+    subjects: [],
+    tags: [],
+    notes: [],
+    cards: []
+  });
+  const [ready, setReady] = useState(false);
+  const [saveError, setSaveError] = useState(false);
+  const [selectedSubjectId, setSelectedSubjectId] = useState(null);
+  const [selectedTagIds, setSelectedTagIds] = useState([]);
+  const [query, setQuery] = useState("");
+  const [tab, setTab] = useState("notes"); // "notes" | "study"
+
+  const [showNewSubject, setShowNewSubject] = useState(false);
+  const [newSubjectName, setNewSubjectName] = useState("");
+  const [newSubjectColor, setNewSubjectColor] = useState(SUBJECT_COLORS[0].hex);
+  const [newSubjectParentId, setNewSubjectParentId] = useState(null);
+  const [editingNote, setEditingNote] = useState(null); // null closed, {} new, note = editing
+  const [editingCard, setEditingCard] = useState(null);
+  const [confirmDialog, setConfirmDialog] = useState(null);
+  const [toast, setToast] = useState(null);
+  const [showImportCards, setShowImportCards] = useState(false);
+  const [showReview, setShowReview] = useState(false);
+  const [showMatch, setShowMatch] = useState(false);
+  const [showOcclusion, setShowOcclusion] = useState(false);
+  const [occlusionSeedImage, setOcclusionSeedImage] = useState(null); // dataUrl | null — prefills from a note image
+  const [occlusionSourceNoteId, setOcclusionSourceNoteId] = useState(null); // link resulting cards back to a note
+  const [studyScope, setStudyScope] = useState("due"); // "due" | "starred" | "all" | "selected"
+  const [selectedNoteFilter, setSelectedNoteFilter] = useState(null); // note id | null
+  const [manualSelectedCardIds, setManualSelectedCardIds] = useState(() => new Set());
+  const [crossTagSession, setCrossTagSession] = useState(null); // { tagName, cards } | null — overrides studyCards when set
+
+  const [noteSelectMode, setNoteSelectMode] = useState(false);
+  const [selectedNoteIdsForBulk, setSelectedNoteIdsForBulk] = useState(() => new Set());
+  const [showBulkTag, setShowBulkTag] = useState(false);
+  const [showBulkMove, setShowBulkMove] = useState(false);
+  const [lightboxImage, setLightboxImage] = useState(null); // dataUrl | null
+
+  const [deviceExportBusy, setDeviceExportBusy] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
+  const [kindleImportBusy, setKindleImportBusy] = useState(false);
+  const [pdfImportFile, setPdfImportFile] = useState(null); // picked file, pending the include-images choice
+  const [pdfImportBusy, setPdfImportBusy] = useState(false);
+  const [pdfImportError, setPdfImportError] = useState("");
+  const [mdImportBusy, setMdImportBusy] = useState(false);
+  const [showAddArticle, setShowAddArticle] = useState(false);
+  const [articleImportBusy, setArticleImportBusy] = useState(false);
+  const [articleImportError, setArticleImportError] = useState("");
+  const [subjectImportBusy, setSubjectImportBusy] = useState(false);
+  const [unlocked, setUnlocked] = useState(false);
+  const [showPinModal, setShowPinModal] = useState(null); // "set" | "change" | "remove" | null
+  const [splitPane, setSplitPane] = useState(null); // null | { type: "note", note } | { type: "cards", noteId, subjectId, scope: "note"|"subject" }
+
+  const [theme, setTheme] = useState("light"); // "light" | "dark"
+  const [remindersOn, setRemindersOn] = useState(false);
+  const askConfirm = (message, onConfirm, confirmLabel) => setConfirmDialog({
+    message,
+    onConfirm,
+    confirmLabel
+  });
+
+  // Load
+  useEffect(() => {
+    (async () => {
+      let loaded = {
+        subjects: [],
+        tags: [],
+        notes: [],
+        cards: []
+      };
+      try {
+        const res = await storage.get(STORAGE_KEY);
+        if (res && res.value) {
+          const parsed = JSON.parse(res.value);
+          loaded = {
+            subjects: parsed.subjects || [],
+            tags: parsed.tags || [],
+            notes: parsed.notes || [],
+            cards: parsed.cards || []
+          };
         }
-        catch (e) {
-            setSaveError(true);
-            return;
+      } catch (e) {
+        // no existing data yet
+      }
+      setData(loaded);
+      try {
+        const themeRes = await storage.get(THEME_KEY);
+        if (themeRes && themeRes.value === "dark") setTheme("dark");
+      } catch (e) {
+        // default to light
+      }
+      try {
+        const remindersRes = await storage.get(REMINDERS_KEY);
+        if (remindersRes && remindersRes.value === "on" && typeof Notification !== "undefined" && Notification.permission === "granted") {
+          setRemindersOn(true);
         }
-        if (driveConnected && !opts.skipDriveSync) {
-            clearTimeout(driveDebounceRef.current);
-            driveDebounceRef.current = setTimeout(() => syncToDrive(next), 2500);
-        }
-    };
-    const syncToDrive = async (dataToSync) => {
-        if (!driveIsAvailable() || !driveConnected)
-            return;
-        setDriveSyncing(true);
-        try {
-            const currentModTime = await driveGetModifiedTime();
-            if (driveKnownModifiedRef.current && currentModTime !== driveKnownModifiedRef.current) {
-                setDriveError("Another device saved more recent changes — pull those first (Sync now) before your next edit, or you'll overwrite them.");
-                setDriveSyncing(false);
-                return;
-            }
-            await drivePush(dataToSync);
-            driveKnownModifiedRef.current = await driveGetModifiedTime();
-            setDriveLastSync(nowISO());
-            setDriveError("");
-        }
-        catch (e) {
-            setDriveError("Sync failed — will try again on your next change.");
-        }
-        finally {
-            setDriveSyncing(false);
-        }
-    };
-    const pullFromDriveNow = async () => {
-        if (!driveIsAvailable() || !driveConnected)
-            return;
-        setDriveSyncing(true);
-        try {
-            const remote = await drivePull();
-            if (remote) {
-                await persist(remote, { skipDriveSync: true });
-            }
-            driveKnownModifiedRef.current = await driveGetModifiedTime();
-            setDriveLastSync(nowISO());
-            setDriveError("");
-        }
-        catch (e) {
-            setDriveError("Couldn't pull from Drive — try again.");
-        }
-        finally {
-            setDriveSyncing(false);
-        }
-    };
-    const onDriveTokenReceived = async () => {
-        setDriveConnected(true);
-        setDriveSyncing(true);
-        try {
-            const remote = await drivePull();
-            if (remote) {
-                await persist(remote, { skipDriveSync: true });
-            }
-            else {
-                await drivePush(data);
-            }
-            driveKnownModifiedRef.current = await driveGetModifiedTime();
-            setDriveLastSync(nowISO());
-            await storage.set(DRIVE_WAS_CONNECTED_KEY, "true");
-        }
-        catch (e) {
-            setDriveError("Connected, but the first sync failed — try 'Sync now'.");
-        }
-        finally {
-            setDriveSyncing(false);
-        }
-    };
-    const connectDrive = () => {
-        setDriveError("");
-        driveRequestAccess(onDriveTokenReceived);
-    };
-    const disconnectDrive = async () => {
-        driveSignOut();
-        setDriveConnected(false);
-        setDriveLastSync(null);
-        setDriveError("");
-        clearTimeout(driveDebounceRef.current);
-        await storage.set(DRIVE_WAS_CONNECTED_KEY, "false");
-    };
-    const runBackupNow = async () => {
-        setBackupBusy(true);
-        setBackupMessage("");
-        try {
-            const filename = await driveCreateBackup(data);
-            setBackupMessage(`Saved as ${filename}`);
-            showToast("Backup saved to Drive");
-        }
-        catch (e) {
-            setBackupMessage("Backup failed — try again.");
-        }
-        finally {
-            setBackupBusy(false);
-        }
-    };
-    const backupToDriveNow = () => {
-        setBackupMessage("");
-        if (driveAccessToken) {
-            runBackupNow();
-        }
-        else {
-            driveRequestAccess(() => runBackupNow());
-        }
-    };
-    const exportEverythingToDevice = async () => {
-        const payload = JSON.stringify(data, null, 2);
-        const filename = `brainly-export-${nowISO().replace(/[:.]/g, "-")}.json`;
-        setDeviceExportBusy(true);
-        try {
-            if (window.showSaveFilePicker) {
-                // Supported browsers (desktop Chrome/Edge): opens a real save dialog
-                // where a plugged-in USB/thumb drive shows up as a destination.
-                try {
-                    const handle = await window.showSaveFilePicker({
-                        suggestedName: filename,
-                        types: [{ description: "Brainly export", accept: { "application/json": [".json"] } }],
-                    });
-                    const writable = await handle.createWritable();
-                    await writable.write(payload);
-                    await writable.close();
-                    showToast("Saved — safe to unplug the drive");
-                    return;
-                }
-                catch (e) {
-                    if (e && e.name === "AbortError")
-                        return; // person cancelled the picker, not an error
-                    // fall through to the plain download below
-                }
-            }
-            // Universal fallback (works on every browser, including mobile):
-            // downloads to the normal Downloads folder; move it to the drive yourself.
-            download(filename, payload, "application/json;charset=utf-8");
-            showToast("Downloaded — move the file to your drive, then unplug");
-        }
-        finally {
-            setDeviceExportBusy(false);
-        }
-    };
-    const isValidBrainlyExport = (parsed) => !!parsed &&
-        typeof parsed === "object" &&
-        Array.isArray(parsed.subjects) &&
-        Array.isArray(parsed.tags) &&
-        Array.isArray(parsed.notes) &&
-        Array.isArray(parsed.cards);
-    const handleImportFile = (e) => {
-        const file = e.target.files && e.target.files[0];
-        e.target.value = ""; // reset so picking the same file again still fires this handler
-        if (!file)
-            return;
-        setImportBusy(true);
-        const reader = new FileReader();
-        reader.onload = () => {
-            setImportBusy(false);
-            let parsed;
-            try {
-                parsed = JSON.parse(reader.result);
-            }
-            catch (err) {
-                showToast("That file isn't valid JSON — couldn't read it as a backup.");
-                return;
-            }
-            if (!isValidBrainlyExport(parsed)) {
-                showToast("That file doesn't look like a Brainly export.");
-                return;
-            }
-            const noteCount = parsed.notes.length;
-            const cardCount = parsed.cards.length;
-            askConfirm(`Import this file? It has ${noteCount} note${noteCount === 1 ? "" : "s"} and ${cardCount} card${cardCount === 1 ? "" : "s"}. This REPLACES everything currently in the app on this device — if you want to keep what's here now, export a backup first.`, async () => {
-                setImportBusy(true);
-                try {
-                    await persist(parsed);
-                    showToast("Import complete");
-                }
-                finally {
-                    setImportBusy(false);
-                }
-            }, "Import and replace");
-        };
-        reader.onerror = () => {
-            setImportBusy(false);
-            showToast("Couldn't read that file — try again.");
-        };
-        reader.readAsText(file);
-    };
-    // Imports a subject-scoped file — the counterpart to
-    // exportSubjectAsDataFile — and MERGES it in rather than replacing
-    // everything, unlike the full-database import above.
-    const handleImportSubjectFile = (e) => {
-        const file = e.target.files && e.target.files[0];
-        e.target.value = "";
-        if (!file)
-            return;
-        setSubjectImportBusy(true);
-        const reader = new FileReader();
-        reader.onload = () => {
-            setSubjectImportBusy(false);
-            let parsed;
-            try {
-                parsed = JSON.parse(reader.result);
-            }
-            catch (err) {
-                showToast("That file isn't valid JSON — couldn't read it as a subject export.");
-                return;
-            }
-            if (!isValidBrainlyExport(parsed)) {
-                showToast("That file doesn't look like a Brainly export.");
-                return;
-            }
-            const subjectNames = parsed.subjects.map((s) => s.name).join(", ") || "(no subjects)";
-            askConfirm(`Bring in "${subjectNames}" — ${parsed.notes.length} note${parsed.notes.length === 1 ? "" : "s"}, ${parsed.cards.length} card${parsed.cards.length === 1 ? "" : "s"}? This adds to what's already here — it won't touch your other subjects. If a subject/note in this file already exists here, the version from this file replaces it.`, async () => {
-                setSubjectImportBusy(true);
-                try {
-                    await mergeImportedData(parsed);
-                    showToast("Subject imported");
-                }
-                finally {
-                    setSubjectImportBusy(false);
-                }
-            }, "Bring in subject");
-        };
-        reader.onerror = () => {
-            setSubjectImportBusy(false);
-            showToast("Couldn't read that file — try again.");
-        };
-        reader.readAsText(file);
-    };
-    // Kindle import — accepts either the web Notebook export (real HTML,
-    // richer: chapter structure, highlight colors, linked notes) or the
-    // on-device My Clippings.txt (plain text, no color data, commonly
-    // holds many books in one file). Detected by content, not just file
-    // extension, since a renamed .txt could still be either. Builds real
-    // note(s) using this editor's own native per-passage highlight
-    // mechanism, not a separate annotation concept Brainly doesn't have.
-    // All Kindle notes land in one auto-created "Kindle Highlights"
-    // subject (reusing it if it already exists) rather than requiring a
-    // subject picker up front — movable afterward with the existing
-    // bulk-move feature if that's not where they should end up.
-    const handleKindleImportFile = (e) => {
-        const file = e.target.files && e.target.files[0];
-        e.target.value = "";
-        if (!file)
-            return;
-        setKindleImportBusy(true);
-        const reader = new FileReader();
-        reader.onload = () => {
-            setKindleImportBusy(false);
-            const text = reader.result;
-            let newNotes;
-            try {
-                if (/<html[\s>]/i.test(text) || /<!DOCTYPE html/i.test(text)) {
-                    const parsed = parseKindleNotebookHTML(text);
-                    if (!parsed.entries.length) {
-                        showToast("Couldn't find any highlights in that Notebook export.");
-                        return;
-                    }
-                    newNotes = [buildBrainlyNoteFromKindleNotebook(parsed)];
-                }
-                else {
-                    const entries = parseKindleClippings(text);
-                    if (!entries.length) {
-                        showToast("Couldn't find any clippings in that file.");
-                        return;
-                    }
-                    newNotes = buildBrainlyNotesFromKindleClippings(entries);
-                }
-            }
-            catch (err) {
-                showToast("Couldn't read that as a Kindle export — check it's the right file.");
-                return;
-            }
-            const bookWord = newNotes.length === 1 ? "book" : "books";
-            askConfirm(`Import highlights from ${newNotes.length} ${bookWord}? These go into a "Kindle Highlights" subject — you can move them afterward if you'd rather they live elsewhere.`, async () => {
-                setKindleImportBusy(true);
-                try {
-                    let subject = data.subjects.find((s) => s.name === "Kindle Highlights");
-                    let subjects = data.subjects;
-                    if (!subject) {
-                        subject = { id: uid(), name: "Kindle Highlights", color: "#C9A96A", parentId: null, createdAt: nowISO() };
-                        subjects = [...subjects, subject];
-                    }
-                    const { tags, ids: kindleTagIds } = resolveTagIds(["kindle"], data.tags);
-                    const now = nowISO();
-                    const notesToAdd = newNotes.map((n) => ({
-                        id: uid(),
-                        subjectId: subject.id,
-                        title: n.title,
-                        bodyHTML: n.bodyHTML,
-                        tagIds: kindleTagIds,
-                        images: n.images,
-                        color: null,
-                        linkedNoteIds: [],
-                        createdAt: now,
-                        updatedAt: now,
-                    }));
-                    await persist({ ...data, subjects, tags, notes: [...data.notes, ...notesToAdd] });
-                    showToast(`Imported ${notesToAdd.length} note${notesToAdd.length === 1 ? "" : "s"}`);
-                }
-                finally {
-                    setKindleImportBusy(false);
-                }
-            }, "Import");
-        };
-        reader.onerror = () => {
-            setKindleImportBusy(false);
-            showToast("Couldn't read that file — try again.");
-        };
-        reader.readAsText(file);
-    };
-    // PDF import is a two-step flow rather than a single file-pick like
-    // Kindle: whether to render page images is a real time/storage
-    // trade-off worth asking about explicitly, not silently defaulting.
-    // Picking a file just stores it and shows that choice; the actual
-    // extraction only starts once confirmed.
-    const handlePdfFilePicked = (e) => {
-        const file = e.target.files && e.target.files[0];
-        e.target.value = "";
-        if (!file)
-            return;
-        setPdfImportError("");
-        setPdfImportFile(file);
-    };
-    const confirmPdfImport = async (includeImages) => {
-        const file = pdfImportFile;
-        if (!file)
-            return;
-        setPdfImportBusy(true);
-        setPdfImportError("");
-        try {
-            const extracted = await extractTextFromPdfFile(file, includeImages);
-            const noteData = buildBrainlyNoteFromPdf(extracted, file.name);
-            let subject = data.subjects.find((s) => s.name === "PDF Imports");
-            let subjects = data.subjects;
-            if (!subject) {
-                subject = { id: uid(), name: "PDF Imports", color: "#6C5CE7", parentId: null, createdAt: nowISO() };
-                subjects = [...subjects, subject];
-            }
-            const { tags, ids: pdfTagIds } = resolveTagIds(["pdf"], data.tags);
-            const now = nowISO();
-            const note = {
+      } catch (e) {
+        // default to off
+      }
+      // The app is fully usable from here. The incoming-share block below can take a few seconds
+      // (it may fetch a web page), so it must not hold up first render.
+      setReady(true);
+
+      // Incoming share (Web Share Target): index.html?title=...&text=...&url=...
+      // If a real URL came through, try extracting the full article
+      // first (the actual point of "share like Readwise Reader" — a
+      // readable note, not just a bare link) before falling back to
+      // the plain link/text note this already did. A toast marks the
+      // start since extraction is a real network round-trip and the
+      // rest of the app is already interactive by this point — it
+      // shouldn't look like nothing is happening.
+      let hadIncomingShare = false; // set below, before the query string gets cleared — the
+      // catch needs this since it can no longer read location.search itself by then.
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const sharedTitle = params.get("title");
+        const sharedText = params.get("text");
+        const sharedUrl = params.get("url");
+        if (sharedTitle || sharedText || sharedUrl) {
+          hadIncomingShare = true;
+          window.history.replaceState(null, "", window.location.pathname);
+          const fields = resolveShareFields(sharedTitle, sharedText, sharedUrl);
+          let articleResult = null;
+          if (fields.url) {
+            setTimeout(() => showToast("Saving shared article…"), 50);
+            articleResult = await tryExtractFullArticle(fields.url);
+          }
+          let targetSubject, subjectsNext, noteTitle, noteBodyHTML, toastMessage;
+          if (articleResult && articleResult.status === "success") {
+            const noteData = buildBrainlyNoteFromArticle(fields.url, articleResult);
+            targetSubject = loaded.subjects.find(s => s.name === "Saved Articles");
+            subjectsNext = loaded.subjects;
+            if (!targetSubject) {
+              targetSubject = {
                 id: uid(),
-                subjectId: subject.id,
-                title: noteData.title,
-                bodyHTML: noteData.bodyHTML,
-                tagIds: pdfTagIds,
-                images: noteData.images,
-                color: null,
-                linkedNoteIds: [],
-                createdAt: now,
-                updatedAt: now,
-            };
-            await persist({ ...data, subjects, tags, notes: [...data.notes, note] });
-            showToast(`Imported "${noteData.title}" (${extracted.pageCount} page${extracted.pageCount === 1 ? "" : "s"})`);
-            setPdfImportFile(null);
-        }
-        catch (err) {
-            setPdfImportError(err.message || "Couldn't read that PDF — try again.");
-        }
-        finally {
-            setPdfImportBusy(false);
-        }
-    };
-    // .md file import (Obsidian/Notion exports) — single-step, unlike
-    // PDF's two-step flow, since there's no meaningful choice to ask
-    // about first (no images-vs-not trade-off here; any embedded images
-    // are just part of the source text). Lands in an "Imported Notes"
-    // subject, auto-created/reused the same way Kindle and PDF imports
-    // each get their own.
-    const handleMarkdownImportFile = (e) => {
-        const file = e.target.files && e.target.files[0];
-        e.target.value = "";
-        if (!file)
-            return;
-        setMdImportBusy(true);
-        const reader = new FileReader();
-        reader.onload = async () => {
-            setMdImportBusy(false);
-            const text = reader.result;
-            if (!text || !text.trim()) {
-                showToast("That file looks empty.");
-                return;
+                name: "Saved Articles",
+                color: "#2F80ED",
+                parentId: null,
+                createdAt: nowISO()
+              };
+              subjectsNext = [...loaded.subjects, targetSubject];
             }
-            const noteData = buildBrainlyNoteFromMarkdownFile(text, file.name);
-            let subject = data.subjects.find((s) => s.name === "Imported Notes");
-            let subjects = data.subjects;
-            if (!subject) {
-                subject = { id: uid(), name: "Imported Notes", color: "#00A187", parentId: null, createdAt: nowISO() };
-                subjects = [...subjects, subject];
-            }
-            const { tags, ids: mdTagIds } = resolveTagIds(noteData.tagNames, data.tags);
-            const now = nowISO();
-            const note = {
+            noteTitle = noteData.title;
+            noteBodyHTML = noteData.bodyHTML;
+            toastMessage = `Saved "${noteData.title}"`;
+          } else {
+            // No URL at all (a plain text/title share), or extraction
+            // failed — same fallback this already had: a "Review"
+            // note with whatever text/link came through, so a share
+            // is never just silently lost.
+            targetSubject = loaded.subjects.find(s => !s.parentId && s.name.toLowerCase() === "review");
+            subjectsNext = loaded.subjects;
+            if (!targetSubject) {
+              targetSubject = {
                 id: uid(),
-                subjectId: subject.id,
-                title: noteData.title,
-                bodyHTML: noteData.bodyHTML,
-                tagIds: mdTagIds,
-                images: noteData.images,
-                color: null,
-                linkedNoteIds: [],
-                createdAt: now,
-                updatedAt: now,
-            };
-            await persist({ ...data, subjects, tags, notes: [...data.notes, note] });
-            showToast(`Imported "${noteData.title}"`);
-        };
-        reader.onerror = () => {
-            setMdImportBusy(false);
-            showToast("Couldn't read that file — try again.");
-        };
-        reader.readAsText(file);
-    };
-    // Shared by both the manual "Add article by URL" flow and the
-    // share-target handoff below — one real save path rather than two
-    // that could quietly drift apart. Lands in a "Saved Articles"
-    // subject, auto-created/reused the same way every other import type
-    // gets its own.
-    const saveArticleAsNote = async (url) => {
-        const result = await tryExtractFullArticle(url);
-        if (result.status !== "success")
-            return { ok: false, reason: result.reason };
-        const noteData = buildBrainlyNoteFromArticle(url, result);
-        let subject = data.subjects.find((s) => s.name === "Saved Articles");
-        let subjects = data.subjects;
-        if (!subject) {
-            subject = { id: uid(), name: "Saved Articles", color: "#2F80ED", parentId: null, createdAt: nowISO() };
-            subjects = [...subjects, subject];
-        }
-        const { tags, ids: articleTagIds } = resolveTagIds(noteData.tagNames, data.tags);
-        const now = nowISO();
-        const note = {
+                name: "Review",
+                color: "#F5A623",
+                parentId: null,
+                createdAt: nowISO()
+              };
+              subjectsNext = [...loaded.subjects, targetSubject];
+            }
+            const bodyParts = [];
+            if (fields.text) bodyParts.push(`<p>${escapeHTML(fields.text)}</p>`);
+            if (fields.url) bodyParts.push(`<p><a href="${escapeHTML(fields.url)}" target="_blank" rel="noopener">${escapeHTML(fields.url)}</a></p>`);
+            noteTitle = fields.title || fields.url || "Shared note";
+            noteBodyHTML = bodyParts.join("") || "<p></p>";
+            toastMessage = fields.url ? "Couldn't extract that article — saved the link instead" : "Saved shared note to Review";
+          }
+          const now = nowISO();
+          const newNote = {
             id: uid(),
-            subjectId: subject.id,
-            title: noteData.title,
-            bodyHTML: noteData.bodyHTML,
-            tagIds: articleTagIds,
-            images: noteData.images,
+            subjectId: targetSubject.id,
+            title: noteTitle,
+            bodyHTML: noteBodyHTML,
+            tagIds: [],
+            images: [],
             color: null,
             linkedNoteIds: [],
             createdAt: now,
-            updatedAt: now,
-        };
-        await persist({ ...data, subjects, tags, notes: [...data.notes, note] });
-        return { ok: true, title: noteData.title };
+            updatedAt: now
+          };
+          const withShare = {
+            ...loaded,
+            subjects: subjectsNext,
+            notes: [...loaded.notes, newNote]
+          };
+          // persist() so the shared note is saved like any other change.
+          await persist(withShare);
+          setSelectedSubjectId(targetSubject.id);
+          setTab("notes");
+          setTimeout(() => showToast(toastMessage), 50);
+        }
+      } catch (e) {
+        // A real incoming share whose processing threw (as opposed to there being no share
+        // at all) used to be silently discarded here — surface it instead so a share never
+        // just vanishes with no explanation.
+        if (hadIncomingShare) {
+          setTimeout(() => showToast(`Couldn't save that share: ${e && e.message ? e.message : e}`), 50);
+        }
+      }
+    })();
+  }, []);
+
+  // Leaving a subject clears any in-progress bulk note selection.
+  useEffect(() => {
+    setNoteSelectMode(false);
+    setSelectedNoteIdsForBulk(new Set());
+  }, [selectedSubjectId]);
+
+  // On narrow screens (the layout stacks at 720px) the sidebar sits above the content, so
+  // choosing Home / Files / a subject changed something out of sight below it. Bring the
+  // content into view when the choice changes. Skipped on first load and on wide screens.
+  const selectionScrollReady = useRef(false);
+  useEffect(() => {
+    if (!selectionScrollReady.current) {
+      selectionScrollReady.current = true;
+      return;
+    }
+    if (window.matchMedia && window.matchMedia("(max-width: 720px)").matches) {
+      const main = document.querySelector(".main");
+      if (main) main.scrollIntoView({
+        block: "start",
+        behavior: "smooth"
+      });
+    }
+  }, [selectedSubjectId]);
+  const persist = async next => {
+    setData(next);
+    try {
+      const res = await storage.set(STORAGE_KEY, JSON.stringify(next));
+      if (!res) throw new Error("no result");
+      setSaveError(false);
+    } catch (e) {
+      setSaveError(true);
+      return;
+    }
+  };
+  const exportEverythingToDevice = async () => {
+    const payload = JSON.stringify(data, null, 2);
+    const filename = `brainly-export-${nowISO().replace(/[:.]/g, "-")}.json`;
+    setDeviceExportBusy(true);
+    try {
+      if (window.showSaveFilePicker) {
+        // Supported browsers (desktop Chrome/Edge): opens a real save dialog
+        // where a plugged-in USB/thumb drive shows up as a destination.
+        try {
+          const handle = await window.showSaveFilePicker({
+            suggestedName: filename,
+            types: [{
+              description: "Brainly export",
+              accept: {
+                "application/json": [".json"]
+              }
+            }]
+          });
+          const writable = await handle.createWritable();
+          await writable.write(payload);
+          await writable.close();
+          showToast("Saved — safe to unplug the drive");
+          return;
+        } catch (e) {
+          if (e && e.name === "AbortError") return; // person cancelled the picker, not an error
+          // fall through to the plain download below
+        }
+      }
+      // Universal fallback (works on every browser, including mobile):
+      // downloads to the normal Downloads folder; move it to the drive yourself.
+      download(filename, payload, "application/json;charset=utf-8");
+      showToast("Downloaded — move the file to your drive, then unplug");
+    } finally {
+      setDeviceExportBusy(false);
+    }
+  };
+  const isValidBrainlyExport = parsed => !!parsed && typeof parsed === "object" && Array.isArray(parsed.subjects) && Array.isArray(parsed.tags) && Array.isArray(parsed.notes) && Array.isArray(parsed.cards);
+  const handleImportFile = e => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ""; // reset so picking the same file again still fires this handler
+    if (!file) return;
+    setImportBusy(true);
+    const reader = new FileReader();
+    reader.onload = () => {
+      setImportBusy(false);
+      let parsed;
+      try {
+        parsed = JSON.parse(reader.result);
+      } catch (err) {
+        showToast("That file isn't valid JSON — couldn't read it as a backup.");
+        return;
+      }
+      if (!isValidBrainlyExport(parsed)) {
+        showToast("That file doesn't look like a Brainly export.");
+        return;
+      }
+      const noteCount = parsed.notes.length;
+      const cardCount = parsed.cards.length;
+      askConfirm(`Import this file? It has ${noteCount} note${noteCount === 1 ? "" : "s"} and ${cardCount} card${cardCount === 1 ? "" : "s"}. This REPLACES everything currently in the app on this device — if you want to keep what's here now, export a backup first.`, async () => {
+        setImportBusy(true);
+        try {
+          await persist(parsed);
+          showToast("Import complete");
+        } finally {
+          setImportBusy(false);
+        }
+      }, "Import and replace");
     };
-    const handleAddArticleConfirm = async (url) => {
-        setArticleImportBusy(true);
-        setArticleImportError("");
-        const result = await saveArticleAsNote(url);
-        setArticleImportBusy(false);
-        if (result.ok) {
-            showToast(`Saved "${result.title}"`);
-            setShowAddArticle(false);
-        }
-        else {
-            setArticleImportError(result.reason || "Couldn't save that article.");
-        }
+    reader.onerror = () => {
+      setImportBusy(false);
+      showToast("Couldn't read that file — try again.");
     };
-    const verifyPin = async (pin) => {
-        if (!data.security || !data.security.pinHash)
-            return false;
-        const hash = await hashPin(pin);
-        return hash === data.security.pinHash;
+    reader.readAsText(file);
+  };
+
+  // Imports a subject-scoped file — the counterpart to
+  // exportSubjectAsDataFile — and MERGES it in rather than replacing
+  // everything, unlike the full-database import above.
+  const handleImportSubjectFile = e => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setSubjectImportBusy(true);
+    const reader = new FileReader();
+    reader.onload = () => {
+      setSubjectImportBusy(false);
+      let parsed;
+      try {
+        parsed = JSON.parse(reader.result);
+      } catch (err) {
+        showToast("That file isn't valid JSON — couldn't read it as a subject export.");
+        return;
+      }
+      if (!isValidBrainlyExport(parsed)) {
+        showToast("That file doesn't look like a Brainly export.");
+        return;
+      }
+      const subjectNames = parsed.subjects.map(s => s.name).join(", ") || "(no subjects)";
+      askConfirm(`Bring in "${subjectNames}" — ${parsed.notes.length} note${parsed.notes.length === 1 ? "" : "s"}, ${parsed.cards.length} card${parsed.cards.length === 1 ? "" : "s"}? This adds to what's already here — it won't touch your other subjects. If a subject/note in this file already exists here, the version from this file replaces it.`, async () => {
+        setSubjectImportBusy(true);
+        try {
+          await mergeImportedData(parsed);
+          showToast("Subject imported");
+        } finally {
+          setSubjectImportBusy(false);
+        }
+      }, "Bring in subject");
     };
-    const savePin = async (newPinOrNull) => {
-        if (newPinOrNull === null) {
-            await persist({ ...data, security: { enabled: false, pinHash: null } });
-            showToast("Passcode removed");
-        }
-        else {
-            const hash = await hashPin(newPinOrNull);
-            await persist({ ...data, security: { enabled: true, pinHash: hash } });
-            setUnlocked(true); // setting/changing the code shouldn't immediately re-lock you out
-            showToast(showPinModal === "change" ? "Passcode changed" : "Passcode set");
-        }
-        setShowPinModal(null);
+    reader.onerror = () => {
+      setSubjectImportBusy(false);
+      showToast("Couldn't read that file — try again.");
     };
-    const showToast = (msg) => {
-        setToast(msg);
-        const duration = Math.min(6000, Math.max(2200, (msg || "").length * 60));
-        setTimeout(() => setToast(null), duration);
-    };
-    const subjects = data.subjects;
-    const topSubjects = useMemo(() => subjects.filter((s) => !s.parentId), [subjects]);
-    const [expandedSubjects, setExpandedSubjects] = useState(new Set());
-    const toggleSubjectExpanded = (id) => {
-        setExpandedSubjects((cur) => {
-            const next = new Set(cur);
-            if (next.has(id))
-                next.delete(id);
-            else
-                next.add(id);
-            return next;
-        });
-    };
-    const childSubjects = (parentId) => subjects.filter((s) => s.parentId === parentId);
-    const flatSubjectOptions = useMemo(() => {
-        const opts = [];
-        topSubjects.forEach((s) => {
-            opts.push({ id: s.id, label: s.name });
-            childSubjects(s.id).forEach((c) => opts.push({ id: c.id, label: "— " + c.name }));
-        });
-        return opts;
-    }, [subjects]);
-    const selectedSubject = subjects.find((s) => s.id === selectedSubjectId) || null;
-    const subjectTags = useMemo(() => {
-        if (!selectedSubjectId)
-            return [];
-        const tagIdSet = new Set();
-        data.notes
-            .filter((n) => n.subjectId === selectedSubjectId)
-            .forEach((n) => n.tagIds.forEach((t) => tagIdSet.add(t)));
-        return data.tags.filter((t) => tagIdSet.has(t.id));
-    }, [data, selectedSubjectId]);
-    const visibleNotes = useMemo(() => {
-        let list = data.notes.filter((n) => n.subjectId === selectedSubjectId);
-        if (selectedTagIds.length) {
-            list = list.filter((n) => selectedTagIds.every((tid) => n.tagIds.includes(tid)));
-        }
-        if (query.trim()) {
-            const q = query.trim().toLowerCase();
-            list = list.filter((n) => n.title.toLowerCase().includes(q) ||
-                htmlToPlainText(n.bodyHTML).toLowerCase().includes(q));
-        }
-        return list.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
-    }, [data.notes, selectedSubjectId, selectedTagIds, query]);
-    const tagName = (id) => data.tags.find((t) => t.id === id)?.name || "";
-    const cardTagIds = (card) => {
-        const set = new Set();
-        data.notes
-            .filter((n) => (card.sourceNoteIds || []).includes(n.id))
-            .forEach((n) => n.tagIds.forEach((t) => set.add(t)));
-        return [...set];
-    };
-    const subjectCardsByTag = useMemo(() => {
-        let list = data.cards.filter((c) => c.subjectId === selectedSubjectId);
-        if (selectedTagIds.length) {
-            list = list.filter((c) => {
-                const ct = cardTagIds(c);
-                return selectedTagIds.every((tid) => ct.includes(tid));
-            });
-        }
-        return list;
-    }, [data.cards, data.notes, selectedSubjectId, selectedTagIds]);
-    // Notes that actually have at least one card under the current tag filter —
-    // powers the "study one note at a time" picker.
-    const notesWithCards = useMemo(() => {
-        const ids = new Set();
-        subjectCardsByTag.forEach((c) => (c.sourceNoteIds || []).forEach((id) => ids.add(id)));
-        return data.notes.filter((n) => ids.has(n.id));
-    }, [subjectCardsByTag, data.notes]);
-    const subjectCards = useMemo(() => {
-        if (!selectedNoteFilter)
-            return subjectCardsByTag;
-        return subjectCardsByTag.filter((c) => (c.sourceNoteIds || []).includes(selectedNoteFilter));
-    }, [subjectCardsByTag, selectedNoteFilter]);
-    const dueCards = useMemo(() => {
-        const now = Date.now();
-        return subjectCards.filter((c) => new Date(c.dueDate).getTime() <= now || c.starred);
-    }, [subjectCards]);
-    const starredCards = useMemo(() => subjectCards.filter((c) => c.starred), [subjectCards]);
-    const manuallySelectedCards = useMemo(() => subjectCards.filter((c) => manualSelectedCardIds.has(c.id)), [subjectCards, manualSelectedCardIds]);
-    const studyCards = useMemo(() => {
-        if (studyScope === "starred")
-            return starredCards;
-        if (studyScope === "all")
-            return subjectCards;
-        if (studyScope === "selected")
-            return manuallySelectedCards;
-        return dueCards;
-    }, [studyScope, dueCards, starredCards, subjectCards, manuallySelectedCards]);
-    const missedCards = useMemo(() => subjectCards.filter((c) => c.box === 1 && c.timesWrong > 0), [subjectCards]);
-    const totalPoints = useMemo(() => data.cards.reduce((sum, c) => sum + c.timesCorrect * POINTS_PER_CORRECT, 0), [data.cards]);
-    // Overdue across every subject, for the top banner — independent of which subject is open.
-    const allDueCards = useMemo(() => {
-        const now = Date.now();
-        return data.cards.filter((c) => new Date(c.dueDate).getTime() <= now);
-    }, [data.cards]);
-    // Next 7 days of card load, for the Dashboard forecast. "Today" covers
-    // everything overdue plus anything due before midnight tonight — not just
-    // cards whose due-timestamp has already passed this exact moment.
-    const dueForecast = useMemo(() => {
-        const now = new Date();
-        const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-        const tomorrowStart = new Date(todayStart);
-        tomorrowStart.setDate(tomorrowStart.getDate() + 1);
-        const todayCount = data.cards.filter((c) => new Date(c.dueDate) < tomorrowStart).length;
-        const days = [{ label: "Today", count: todayCount }];
-        for (let i = 1; i <= 6; i++) {
-            const dayStart = new Date(todayStart);
-            dayStart.setDate(dayStart.getDate() + i);
-            const dayEnd = new Date(dayStart);
-            dayEnd.setDate(dayEnd.getDate() + 1);
-            const count = data.cards.filter((c) => {
-                const d = new Date(c.dueDate);
-                return d >= dayStart && d < dayEnd;
-            }).length;
-            const label = i === 1 ? "Tmrw" : dayStart.toLocaleDateString(undefined, { weekday: "short" });
-            days.push({ label, count });
-        }
-        return days;
-    }, [data.cards]);
-    const weakSpots = useMemo(() => {
-        const map = {};
-        data.cards.forEach((c) => {
-            const attempts = c.timesCorrect + c.timesWrong;
-            if (attempts === 0)
-                return;
-            const tagIds = cardTagIds(c);
-            tagIds.forEach((tagId) => {
-                const key = c.subjectId + "|" + tagId;
-                if (!map[key])
-                    map[key] = { subjectId: c.subjectId, tagId, correct: 0, wrong: 0 };
-                map[key].correct += c.timesCorrect;
-                map[key].wrong += c.timesWrong;
-            });
-        });
-        return Object.values(map)
-            .map((e) => ({ ...e, attempts: e.correct + e.wrong, accuracy: e.correct / (e.correct + e.wrong) }))
-            .filter((e) => e.attempts >= 2)
-            .sort((a, b) => a.accuracy - b.accuracy)
-            .slice(0, 8);
-    }, [data.cards, data.notes]);
-    // Cross-subject: cards under a given tag regardless of which subject they live in.
-    const cardsByTagAcrossSubjects = (tagId) => data.cards.filter((c) => cardTagIds(c).includes(tagId));
-    const globalTagStats = useMemo(() => {
-        return data.tags
-            .map((t) => ({ id: t.id, name: t.name, count: cardsByTagAcrossSubjects(t.id).length }))
-            .filter((t) => t.count > 0)
-            .sort((a, b) => b.count - a.count);
-    }, [data.tags, data.cards, data.notes]);
-    // ---- Subject handlers ----
-    const createSubject = async () => {
-        const name = newSubjectName.trim();
-        if (!name)
+    reader.readAsText(file);
+  };
+
+  // Kindle import — accepts either the web Notebook export (real HTML,
+  // richer: chapter structure, highlight colors, linked notes) or the
+  // on-device My Clippings.txt (plain text, no color data, commonly
+  // holds many books in one file). Detected by content, not just file
+  // extension, since a renamed .txt could still be either. Builds real
+  // note(s) using this editor's own native per-passage highlight
+  // mechanism, not a separate annotation concept Brainly doesn't have.
+  // All Kindle notes land in one auto-created "Kindle Highlights"
+  // subject (reusing it if it already exists) rather than requiring a
+  // subject picker up front — movable afterward with the existing
+  // bulk-move feature if that's not where they should end up.
+  const handleKindleImportFile = e => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setKindleImportBusy(true);
+    const reader = new FileReader();
+    reader.onload = () => {
+      setKindleImportBusy(false);
+      const text = reader.result;
+      let newNotes;
+      try {
+        if (/<html[\s>]/i.test(text) || /<!DOCTYPE html/i.test(text)) {
+          const parsed = parseKindleNotebookHTML(text);
+          if (!parsed.entries.length) {
+            showToast("Couldn't find any highlights in that Notebook export.");
             return;
-        const subj = {
+          }
+          newNotes = [buildBrainlyNoteFromKindleNotebook(parsed)];
+        } else {
+          const entries = parseKindleClippings(text);
+          if (!entries.length) {
+            showToast("Couldn't find any clippings in that file.");
+            return;
+          }
+          newNotes = buildBrainlyNotesFromKindleClippings(entries);
+        }
+      } catch (err) {
+        showToast("Couldn't read that as a Kindle export — check it's the right file.");
+        return;
+      }
+      const bookWord = newNotes.length === 1 ? "book" : "books";
+      askConfirm(`Import highlights from ${newNotes.length} ${bookWord}? These go into a "Kindle Highlights" subject — you can move them afterward if you'd rather they live elsewhere.`, async () => {
+        setKindleImportBusy(true);
+        try {
+          let subject = data.subjects.find(s => s.name === "Kindle Highlights");
+          let subjects = data.subjects;
+          if (!subject) {
+            subject = {
+              id: uid(),
+              name: "Kindle Highlights",
+              color: "#C9A96A",
+              parentId: null,
+              createdAt: nowISO()
+            };
+            subjects = [...subjects, subject];
+          }
+          const {
+            tags,
+            ids: kindleTagIds
+          } = resolveTagIds(["kindle"], data.tags);
+          const now = nowISO();
+          const notesToAdd = newNotes.map(n => ({
             id: uid(),
-            name,
-            color: newSubjectColor,
-            parentId: newSubjectParentId || null,
-            createdAt: nowISO(),
+            subjectId: subject.id,
+            title: n.title,
+            bodyHTML: n.bodyHTML,
+            tagIds: kindleTagIds,
+            images: n.images,
+            color: null,
+            linkedNoteIds: [],
+            createdAt: now,
+            updatedAt: now
+          }));
+          await persist({
+            ...data,
+            subjects,
+            tags,
+            notes: [...data.notes, ...notesToAdd]
+          });
+          showToast(`Imported ${notesToAdd.length} note${notesToAdd.length === 1 ? "" : "s"}`);
+        } finally {
+          setKindleImportBusy(false);
+        }
+      }, "Import");
+    };
+    reader.onerror = () => {
+      setKindleImportBusy(false);
+      showToast("Couldn't read that file — try again.");
+    };
+    reader.readAsText(file);
+  };
+
+  // PDF import is a two-step flow rather than a single file-pick like
+  // Kindle: whether to render page images is a real time/storage
+  // trade-off worth asking about explicitly, not silently defaulting.
+  // Picking a file just stores it and shows that choice; the actual
+  // extraction only starts once confirmed.
+  const handlePdfFilePicked = e => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setPdfImportError("");
+    setPdfImportFile(file);
+  };
+  const confirmPdfImport = async includeImages => {
+    const file = pdfImportFile;
+    if (!file) return;
+    setPdfImportBusy(true);
+    setPdfImportError("");
+    try {
+      const extracted = await extractTextFromPdfFile(file, includeImages);
+      const noteData = buildBrainlyNoteFromPdf(extracted, file.name);
+      let subject = data.subjects.find(s => s.name === "PDF Imports");
+      let subjects = data.subjects;
+      if (!subject) {
+        subject = {
+          id: uid(),
+          name: "PDF Imports",
+          color: "#6C5CE7",
+          parentId: null,
+          createdAt: nowISO()
         };
-        const next = { ...data, subjects: [...data.subjects, subj] };
-        await persist(next);
-        setSelectedSubjectId(subj.id);
+        subjects = [...subjects, subject];
+      }
+      const {
+        tags,
+        ids: pdfTagIds
+      } = resolveTagIds(["pdf"], data.tags);
+      const now = nowISO();
+      const note = {
+        id: uid(),
+        subjectId: subject.id,
+        title: noteData.title,
+        bodyHTML: noteData.bodyHTML,
+        tagIds: pdfTagIds,
+        images: noteData.images,
+        color: null,
+        linkedNoteIds: [],
+        createdAt: now,
+        updatedAt: now
+      };
+      await persist({
+        ...data,
+        subjects,
+        tags,
+        notes: [...data.notes, note]
+      });
+      showToast(`Imported "${noteData.title}" (${extracted.pageCount} page${extracted.pageCount === 1 ? "" : "s"})`);
+      setPdfImportFile(null);
+    } catch (err) {
+      setPdfImportError(err.message || "Couldn't read that PDF — try again.");
+    } finally {
+      setPdfImportBusy(false);
+    }
+  };
+
+  // .md file import (Obsidian/Notion exports) — single-step, unlike
+  // PDF's two-step flow, since there's no meaningful choice to ask
+  // about first (no images-vs-not trade-off here; any embedded images
+  // are just part of the source text). Lands in an "Imported Notes"
+  // subject, auto-created/reused the same way Kindle and PDF imports
+  // each get their own.
+  const handleMarkdownImportFile = e => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setMdImportBusy(true);
+    const reader = new FileReader();
+    reader.onload = async () => {
+      setMdImportBusy(false);
+      const text = reader.result;
+      if (!text || !text.trim()) {
+        showToast("That file looks empty.");
+        return;
+      }
+      const noteData = buildBrainlyNoteFromMarkdownFile(text, file.name);
+      let subject = data.subjects.find(s => s.name === "Imported Notes");
+      let subjects = data.subjects;
+      if (!subject) {
+        subject = {
+          id: uid(),
+          name: "Imported Notes",
+          color: "#00A187",
+          parentId: null,
+          createdAt: nowISO()
+        };
+        subjects = [...subjects, subject];
+      }
+      const {
+        tags,
+        ids: mdTagIds
+      } = resolveTagIds(noteData.tagNames, data.tags);
+      const now = nowISO();
+      const note = {
+        id: uid(),
+        subjectId: subject.id,
+        title: noteData.title,
+        bodyHTML: noteData.bodyHTML,
+        tagIds: mdTagIds,
+        images: noteData.images,
+        color: null,
+        linkedNoteIds: [],
+        createdAt: now,
+        updatedAt: now
+      };
+      await persist({
+        ...data,
+        subjects,
+        tags,
+        notes: [...data.notes, note]
+      });
+      showToast(`Imported "${noteData.title}"`);
+    };
+    reader.onerror = () => {
+      setMdImportBusy(false);
+      showToast("Couldn't read that file — try again.");
+    };
+    reader.readAsText(file);
+  };
+
+  // Shared by both the manual "Add article by URL" flow and the
+  // share-target handoff below — one real save path rather than two
+  // that could quietly drift apart. Lands in a "Saved Articles"
+  // subject, auto-created/reused the same way every other import type
+  // gets its own.
+  const saveArticleAsNote = async url => {
+    const result = await tryExtractFullArticle(url);
+    if (result.status !== "success") return {
+      ok: false,
+      reason: result.reason
+    };
+    const noteData = buildBrainlyNoteFromArticle(url, result);
+    let subject = data.subjects.find(s => s.name === "Saved Articles");
+    let subjects = data.subjects;
+    if (!subject) {
+      subject = {
+        id: uid(),
+        name: "Saved Articles",
+        color: "#2F80ED",
+        parentId: null,
+        createdAt: nowISO()
+      };
+      subjects = [...subjects, subject];
+    }
+    const {
+      tags,
+      ids: articleTagIds
+    } = resolveTagIds(noteData.tagNames, data.tags);
+    const now = nowISO();
+    const note = {
+      id: uid(),
+      subjectId: subject.id,
+      title: noteData.title,
+      bodyHTML: noteData.bodyHTML,
+      tagIds: articleTagIds,
+      images: noteData.images,
+      color: null,
+      linkedNoteIds: [],
+      createdAt: now,
+      updatedAt: now
+    };
+    await persist({
+      ...data,
+      subjects,
+      tags,
+      notes: [...data.notes, note]
+    });
+    return {
+      ok: true,
+      title: noteData.title
+    };
+  };
+  const handleAddArticleConfirm = async url => {
+    setArticleImportBusy(true);
+    setArticleImportError("");
+    const result = await saveArticleAsNote(url);
+    setArticleImportBusy(false);
+    if (result.ok) {
+      showToast(`Saved "${result.title}"`);
+      setShowAddArticle(false);
+    } else {
+      setArticleImportError(result.reason || "Couldn't save that article.");
+    }
+  };
+  const verifyPin = async pin => {
+    if (!data.security || !data.security.pinHash) return false;
+    const hash = await hashPin(pin);
+    return hash === data.security.pinHash;
+  };
+  const savePin = async newPinOrNull => {
+    if (newPinOrNull === null) {
+      await persist({
+        ...data,
+        security: {
+          enabled: false,
+          pinHash: null
+        }
+      });
+      showToast("Passcode removed");
+    } else {
+      const hash = await hashPin(newPinOrNull);
+      await persist({
+        ...data,
+        security: {
+          enabled: true,
+          pinHash: hash
+        }
+      });
+      setUnlocked(true); // setting/changing the code shouldn't immediately re-lock you out
+      showToast(showPinModal === "change" ? "Passcode changed" : "Passcode set");
+    }
+    setShowPinModal(null);
+  };
+  const showToast = msg => {
+    setToast(msg);
+    const duration = Math.min(6000, Math.max(2200, (msg || "").length * 60));
+    setTimeout(() => setToast(null), duration);
+  };
+  const subjects = data.subjects;
+  const topSubjects = useMemo(() => subjects.filter(s => !s.parentId), [subjects]);
+  const [expandedSubjects, setExpandedSubjects] = useState(new Set());
+  const toggleSubjectExpanded = id => {
+    setExpandedSubjects(cur => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);else next.add(id);
+      return next;
+    });
+  };
+  const childSubjects = parentId => subjects.filter(s => s.parentId === parentId);
+  const flatSubjectOptions = useMemo(() => {
+    const opts = [];
+    topSubjects.forEach(s => {
+      opts.push({
+        id: s.id,
+        label: s.name
+      });
+      childSubjects(s.id).forEach(c => opts.push({
+        id: c.id,
+        label: "— " + c.name
+      }));
+    });
+    return opts;
+  }, [subjects]);
+  const selectedSubject = subjects.find(s => s.id === selectedSubjectId) || null;
+  const showFilesPage = selectedSubjectId === FILES_VIEW; // the Files page is a pseudo-subject, so picking Home or any real subject leaves it automatically
+
+  const subjectTags = useMemo(() => {
+    if (!selectedSubjectId) return [];
+    const tagIdSet = new Set();
+    data.notes.filter(n => n.subjectId === selectedSubjectId).forEach(n => n.tagIds.forEach(t => tagIdSet.add(t)));
+    return data.tags.filter(t => tagIdSet.has(t.id));
+  }, [data, selectedSubjectId]);
+  const visibleNotes = useMemo(() => {
+    let list = data.notes.filter(n => n.subjectId === selectedSubjectId);
+    if (selectedTagIds.length) {
+      list = list.filter(n => selectedTagIds.every(tid => n.tagIds.includes(tid)));
+    }
+    if (query.trim()) {
+      const q = query.trim().toLowerCase();
+      list = list.filter(n => n.title.toLowerCase().includes(q) || htmlToPlainText(n.bodyHTML).toLowerCase().includes(q));
+    }
+    return list.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+  }, [data.notes, selectedSubjectId, selectedTagIds, query]);
+  const tagName = id => data.tags.find(t => t.id === id)?.name || "";
+  const cardTagIds = card => {
+    const set = new Set();
+    data.notes.filter(n => (card.sourceNoteIds || []).includes(n.id)).forEach(n => n.tagIds.forEach(t => set.add(t)));
+    return [...set];
+  };
+  const subjectCardsByTag = useMemo(() => {
+    let list = data.cards.filter(c => c.subjectId === selectedSubjectId);
+    if (selectedTagIds.length) {
+      list = list.filter(c => {
+        const ct = cardTagIds(c);
+        return selectedTagIds.every(tid => ct.includes(tid));
+      });
+    }
+    return list;
+  }, [data.cards, data.notes, selectedSubjectId, selectedTagIds]);
+
+  // Notes that actually have at least one card under the current tag filter —
+  // powers the "study one note at a time" picker.
+  const notesWithCards = useMemo(() => {
+    const ids = new Set();
+    subjectCardsByTag.forEach(c => (c.sourceNoteIds || []).forEach(id => ids.add(id)));
+    return data.notes.filter(n => ids.has(n.id));
+  }, [subjectCardsByTag, data.notes]);
+  const subjectCards = useMemo(() => {
+    if (!selectedNoteFilter) return subjectCardsByTag;
+    return subjectCardsByTag.filter(c => (c.sourceNoteIds || []).includes(selectedNoteFilter));
+  }, [subjectCardsByTag, selectedNoteFilter]);
+  const dueCards = useMemo(() => {
+    const now = Date.now();
+    return subjectCards.filter(c => new Date(c.dueDate).getTime() <= now || c.starred);
+  }, [subjectCards]);
+  const starredCards = useMemo(() => subjectCards.filter(c => c.starred), [subjectCards]);
+  const manuallySelectedCards = useMemo(() => subjectCards.filter(c => manualSelectedCardIds.has(c.id)), [subjectCards, manualSelectedCardIds]);
+  const studyCards = useMemo(() => {
+    if (studyScope === "starred") return starredCards;
+    if (studyScope === "all") return subjectCards;
+    if (studyScope === "selected") return manuallySelectedCards;
+    return dueCards;
+  }, [studyScope, dueCards, starredCards, subjectCards, manuallySelectedCards]);
+  const missedCards = useMemo(() => subjectCards.filter(c => c.box === 1 && c.timesWrong > 0), [subjectCards]);
+  const totalPoints = useMemo(() => data.cards.reduce((sum, c) => sum + c.timesCorrect * POINTS_PER_CORRECT, 0), [data.cards]);
+
+  // Overdue across every subject, for the top banner — independent of which subject is open.
+  const allDueCards = useMemo(() => {
+    const now = Date.now();
+    return data.cards.filter(c => new Date(c.dueDate).getTime() <= now);
+  }, [data.cards]);
+
+  // Next 7 days of card load, for the Dashboard forecast. "Today" covers
+  // everything overdue plus anything due before midnight tonight — not just
+  // cards whose due-timestamp has already passed this exact moment.
+  const dueForecast = useMemo(() => {
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const tomorrowStart = new Date(todayStart);
+    tomorrowStart.setDate(tomorrowStart.getDate() + 1);
+    const todayCount = data.cards.filter(c => new Date(c.dueDate) < tomorrowStart).length;
+    const days = [{
+      label: "Today",
+      count: todayCount
+    }];
+    for (let i = 1; i <= 6; i++) {
+      const dayStart = new Date(todayStart);
+      dayStart.setDate(dayStart.getDate() + i);
+      const dayEnd = new Date(dayStart);
+      dayEnd.setDate(dayEnd.getDate() + 1);
+      const count = data.cards.filter(c => {
+        const d = new Date(c.dueDate);
+        return d >= dayStart && d < dayEnd;
+      }).length;
+      const label = i === 1 ? "Tmrw" : dayStart.toLocaleDateString(undefined, {
+        weekday: "short"
+      });
+      days.push({
+        label,
+        count
+      });
+    }
+    return days;
+  }, [data.cards]);
+  const weakSpots = useMemo(() => {
+    const map = {};
+    data.cards.forEach(c => {
+      const attempts = c.timesCorrect + c.timesWrong;
+      if (attempts === 0) return;
+      const tagIds = cardTagIds(c);
+      tagIds.forEach(tagId => {
+        const key = c.subjectId + "|" + tagId;
+        if (!map[key]) map[key] = {
+          subjectId: c.subjectId,
+          tagId,
+          correct: 0,
+          wrong: 0
+        };
+        map[key].correct += c.timesCorrect;
+        map[key].wrong += c.timesWrong;
+      });
+    });
+    return Object.values(map).map(e => ({
+      ...e,
+      attempts: e.correct + e.wrong,
+      accuracy: e.correct / (e.correct + e.wrong)
+    })).filter(e => e.attempts >= 2).sort((a, b) => a.accuracy - b.accuracy).slice(0, 8);
+  }, [data.cards, data.notes]);
+
+  // Cross-subject: cards under a given tag regardless of which subject they live in.
+  const cardsByTagAcrossSubjects = tagId => data.cards.filter(c => cardTagIds(c).includes(tagId));
+  const globalTagStats = useMemo(() => {
+    return data.tags.map(t => ({
+      id: t.id,
+      name: t.name,
+      count: cardsByTagAcrossSubjects(t.id).length
+    })).filter(t => t.count > 0).sort((a, b) => b.count - a.count);
+  }, [data.tags, data.cards, data.notes]);
+
+  // ---- Subject handlers ----
+
+  const createSubject = async () => {
+    const name = newSubjectName.trim();
+    if (!name) return;
+    const subj = {
+      id: uid(),
+      name,
+      color: newSubjectColor,
+      parentId: newSubjectParentId || null,
+      createdAt: nowISO()
+    };
+    const next = {
+      ...data,
+      subjects: [...data.subjects, subj]
+    };
+    await persist(next);
+    setSelectedSubjectId(subj.id);
+    setSelectedTagIds([]);
+    setStudyScope("due");
+    setSelectedNoteFilter(null);
+    setManualSelectedCardIds(new Set());
+    setNewSubjectName("");
+    setNewSubjectParentId(null);
+    setShowNewSubject(false);
+  };
+  const deleteSubject = id => {
+    const children = childSubjects(id);
+    const warnExtra = children.length ? ` and ${children.length} sub-subject${children.length === 1 ? "" : "s"}` : "";
+    askConfirm(`Delete this subject${warnExtra}, along with all its notes and cards? This can't be undone.`, async () => {
+      const idsToRemove = new Set([id, ...children.map(c => c.id)]);
+      const next = {
+        ...data,
+        subjects: data.subjects.filter(s => !idsToRemove.has(s.id)),
+        notes: data.notes.filter(n => !idsToRemove.has(n.subjectId)),
+        cards: data.cards.filter(c => !idsToRemove.has(c.subjectId))
+      };
+      await persist(next);
+      if (idsToRemove.has(selectedSubjectId)) {
+        setSelectedSubjectId(null);
         setSelectedTagIds([]);
+      }
+      showToast("Subject deleted");
+    });
+  };
+
+  // ---- Note handlers ----
+
+  const resolveTagIds = (names, currentTags) => {
+    const tags = [...currentTags];
+    const ids = [];
+    names.forEach(rawName => {
+      const name = rawName.trim();
+      if (!name) return;
+      let existing = tags.find(t => t.name.toLowerCase() === name.toLowerCase());
+      if (!existing) {
+        existing = {
+          id: uid(),
+          name
+        };
+        tags.push(existing);
+      }
+      ids.push(existing.id);
+    });
+    return {
+      tags,
+      ids: [...new Set(ids)]
+    };
+  };
+  const toggleNoteSelection = id => {
+    setSelectedNoteIdsForBulk(cur => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);else next.add(id);
+      return next;
+    });
+  };
+  const applyBulkTag = async tagNamesToAdd => {
+    if (selectedNoteIdsForBulk.size === 0 || tagNamesToAdd.length === 0) return;
+    const {
+      tags,
+      ids: newTagIds
+    } = resolveTagIds(tagNamesToAdd, data.tags);
+    const notes = data.notes.map(n => selectedNoteIdsForBulk.has(n.id) ? {
+      ...n,
+      tagIds: [...new Set([...n.tagIds, ...newTagIds])],
+      updatedAt: nowISO()
+    } : n);
+    await persist({
+      ...data,
+      tags,
+      notes
+    });
+    showToast(`Added tag${tagNamesToAdd.length === 1 ? "" : "s"} to ${selectedNoteIdsForBulk.size} note${selectedNoteIdsForBulk.size === 1 ? "" : "s"}`);
+    setShowBulkTag(false);
+    setSelectedNoteIdsForBulk(new Set());
+    setNoteSelectMode(false);
+  };
+
+  // Moves a batch of selected notes (and any cards created from them) to a
+  // different subject in one operation — how splitting an over-large
+  // subject into smaller sub-subjects actually happens: select the notes
+  // that belong together, move them into a freshly-created sub-subject,
+  // then archive that sub-subject on its own once it's not being studied.
+  const applyBulkMove = async (mode, value) => {
+    if (selectedNoteIdsForBulk.size === 0 || !value) return;
+    let targetSubjectId = value;
+    let subjects = data.subjects;
+    if (mode === "new") {
+      const parentId = selectedSubject.parentId || selectedSubject.id; // nest as a SIBLING of the current view, never a grandchild
+      const newSubject = {
+        id: uid(),
+        name: value,
+        color: selectedSubject.color,
+        parentId,
+        createdAt: nowISO()
+      };
+      subjects = [...data.subjects, newSubject];
+      targetSubjectId = newSubject.id;
+    }
+    const notes = data.notes.map(n => selectedNoteIdsForBulk.has(n.id) ? {
+      ...n,
+      subjectId: targetSubjectId,
+      updatedAt: nowISO()
+    } : n);
+    const cards = data.cards.map(c => (c.sourceNoteIds || []).some(nid => selectedNoteIdsForBulk.has(nid)) ? {
+      ...c,
+      subjectId: targetSubjectId
+    } : c);
+    const count = selectedNoteIdsForBulk.size;
+    await persist({
+      ...data,
+      subjects,
+      notes,
+      cards
+    });
+    showToast(`Moved ${count} note${count === 1 ? "" : "s"}`);
+    setShowBulkMove(false);
+    setSelectedNoteIdsForBulk(new Set());
+    setNoteSelectMode(false);
+  };
+  const saveNote = async (targetNote, {
+    title,
+    bodyHTML,
+    tagNames,
+    images,
+    color,
+    subjectId,
+    linkedNoteIds
+  }) => {
+    const targetSubjectId = subjectId || targetNote && targetNote.subjectId || selectedSubjectId;
+    if (!targetSubjectId) return;
+    const {
+      tags,
+      ids
+    } = resolveTagIds(tagNames, data.tags);
+    let notes;
+    let cards = data.cards;
+    let savedNoteId;
+    if (targetNote && targetNote.id) {
+      savedNoteId = targetNote.id;
+      const moved = targetSubjectId !== targetNote.subjectId;
+      notes = data.notes.map(n => n.id === targetNote.id ? {
+        ...n,
+        title,
+        bodyHTML,
+        tagIds: ids,
+        images,
+        color,
+        subjectId: targetSubjectId,
+        linkedNoteIds: linkedNoteIds || [],
+        updatedAt: nowISO()
+      } : n);
+      if (moved) {
+        cards = data.cards.map(c => (c.sourceNoteIds || []).includes(targetNote.id) ? {
+          ...c,
+          subjectId: targetSubjectId
+        } : c);
+      }
+    } else {
+      savedNoteId = uid();
+      const note = {
+        id: savedNoteId,
+        subjectId: targetSubjectId,
+        title: title || "Untitled",
+        bodyHTML,
+        tagIds: ids,
+        images: images || [],
+        color: color || null,
+        linkedNoteIds: linkedNoteIds || [],
+        createdAt: nowISO(),
+        updatedAt: nowISO()
+      };
+      notes = [...data.notes, note];
+    }
+    const sync = syncAutoCardsFromNote(cards, savedNoteId, targetSubjectId, bodyHTML, htmlToPlainText, nowISO, uid);
+    cards = sync.cards;
+    await persist({
+      ...data,
+      tags,
+      notes,
+      cards
+    });
+    const bits = [];
+    if (sync.addedCount) bits.push(`${sync.addedCount} card${sync.addedCount === 1 ? "" : "s"} linked`);
+    if (sync.removedCount) bits.push(`${sync.removedCount} removed`);
+    showToast("Note saved" + (bits.length ? " — " + bits.join(", ") : ""));
+    return savedNoteId;
+  };
+  const quickAddNote = async (title, bodyHTML, tagNames, color, images) => {
+    if (!selectedSubjectId) throw new Error("Pick a subject first");
+    if (!noteHasContent(title, bodyHTML, images)) return;
+    const {
+      tags,
+      ids
+    } = resolveTagIds(tagNames, data.tags);
+    const now = nowISO();
+    const noteId = uid();
+    const note = {
+      id: noteId,
+      subjectId: selectedSubjectId,
+      title: (title || "").trim(),
+      bodyHTML,
+      tagIds: ids,
+      images: images || [],
+      color: color || null,
+      linkedNoteIds: [],
+      createdAt: now,
+      updatedAt: now
+    };
+    const sync = syncAutoCardsFromNote(data.cards, noteId, selectedSubjectId, bodyHTML, htmlToPlainText, nowISO, uid);
+    await persist({
+      ...data,
+      tags,
+      notes: [...data.notes, note],
+      cards: sync.cards
+    });
+    showToast(sync.addedCount ? `Note added — ${sync.addedCount} card${sync.addedCount === 1 ? "" : "s"} linked` : "Note added");
+  };
+  const deleteNote = id => {
+    askConfirm("Delete this note?", async () => {
+      const notes = data.notes.filter(n => n.id !== id).map(n => (n.linkedNoteIds || []).includes(id) ? {
+        ...n,
+        linkedNoteIds: n.linkedNoteIds.filter(lid => lid !== id)
+      } : n);
+      await persist({
+        ...data,
+        notes
+      });
+      showToast("Note deleted");
+    });
+  };
+  const navigateToNote = noteId => {
+    const target = data.notes.find(n => n.id === noteId);
+    if (!target) return;
+    setSelectedSubjectId(target.subjectId);
+    setSelectedTagIds([]);
+    setTab("notes");
+    setEditingNote(target);
+    setSplitPane(null);
+  };
+  const openSplitNote = noteId => {
+    const target = data.notes.find(n => n.id === noteId);
+    if (!target) return;
+    setSplitPane({
+      type: "note",
+      note: target
+    });
+  };
+  const openSplitCards = (noteId, subjectId) => {
+    setSplitPane({
+      type: "cards",
+      noteId,
+      subjectId,
+      scope: "note"
+    });
+  };
+  const splitPaneCards = useMemo(() => {
+    if (!splitPane || splitPane.type !== "cards") return [];
+    if (splitPane.scope === "subject") {
+      return data.cards.filter(c => c.subjectId === splitPane.subjectId);
+    }
+    return data.cards.filter(c => (c.sourceNoteIds || []).includes(splitPane.noteId));
+  }, [splitPane, data.cards]);
+  const createCardFromHighlight = async (noteId, front, back) => {
+    if (!noteId || !selectedSubjectId) return;
+    const now = nowISO();
+    const card = {
+      id: uid(),
+      subjectId: selectedSubjectId,
+      front,
+      back,
+      sourceNoteIds: [noteId],
+      box: 1,
+      dueDate: now,
+      starred: false,
+      timesCorrect: 0,
+      timesWrong: 0,
+      createdAt: now
+    };
+    await persist({
+      ...data,
+      cards: [...data.cards, card]
+    });
+    showToast("Card created from highlight");
+  };
+
+  // ---- Export / share ----
+
+  const exportNote = (note, mode) => {
+    const tagNames = note.tagIds.map(tagName);
+    if (mode === "copy") {
+      copyText(noteToMarkdown(note, selectedSubject?.name, tagNames)).then(ok => showToast(ok ? "Copied as Markdown" : "Couldn't copy"));
+    } else if (mode === "download") {
+      download(`${slug(note.title)}.md`, noteToMarkdown(note, selectedSubject?.name, tagNames));
+      showToast("Downloaded .md");
+    } else if (mode === "pdf") {
+      const imgHTML = (note.images || []).map(img => `<img src="${img.dataUrl}" style="max-width:100%;border-radius:8px;margin-top:10px;" />`).join("");
+      printHTML(note.title, `<h1>${note.title}</h1><div class="meta">${selectedSubject?.name || ""} ${tagNames.length ? "· " + tagNames.map(t => "#" + t).join(" ") : ""}</div>${note.bodyHTML || ""}${imgHTML}`);
+    } else if (mode === "share") {
+      shareText(note.title, noteToMarkdown(note, selectedSubject?.name, tagNames)).then(result => {
+        if (result === "shared") showToast("Shared");else if (result === "copied") showToast("Couldn't open share sheet — copied instead");else if (result === "failed") showToast("Couldn't share or copy");
+      });
+    }
+  };
+  const exportSubjectNotes = mode => {
+    if (!selectedSubject) return;
+    const subjNotes = data.notes.filter(n => n.subjectId === selectedSubject.id);
+    if (mode === "md") {
+      const md = subjNotes.map(n => noteToMarkdown(n, selectedSubject.name, n.tagIds.map(tagName))).join("\n\n---\n\n");
+      download(`${slug(selectedSubject.name)}-all-notes.md`, md || `# ${selectedSubject.name}\n\n(no notes yet)`);
+      showToast(`Exported ${subjNotes.length} note${subjNotes.length === 1 ? "" : "s"}`);
+    } else if (mode === "pdf") {
+      const bodyHTML = subjNotes.map(n => `<h1>${n.title}</h1><div class="meta">${n.tagIds.map(t => "#" + tagName(t)).join(" ")}</div>${n.bodyHTML || ""}<hr/>`).join("");
+      printHTML(selectedSubject.name, bodyHTML || `<p>No notes yet in ${selectedSubject.name}.</p>`);
+    }
+  };
+  const exportSubjectCards = mode => {
+    if (!selectedSubject) return;
+    const cards = data.cards.filter(c => c.subjectId === selectedSubject.id);
+    if (mode === "md") {
+      download(`${slug(selectedSubject.name)}-cards.txt`, cardsToSeparatorText(cards, "\t", "\n"), "text/plain");
+      showToast(`Exported ${cards.length} card${cards.length === 1 ? "" : "s"} (tab-separated, Quizlet-ready)`);
+    } else if (mode === "pdf") {
+      const bodyHTML = `<h1>${selectedSubject.name} — flashcards</h1>` + cards.map(c => c.frontImage ? `<div class="card"><img src="${c.frontImage}" style="max-width:100%;border-radius:8px;margin-bottom:8px;" /><div class="back">${c.back}</div></div>` : `<div class="card"><div class="front">${c.front}</div><div class="back">${c.back}</div></div>`).join("");
+      printHTML(selectedSubject.name + " cards", bodyHTML || "<p>No cards yet.</p>");
+    } else if (mode === "share") {
+      shareText(selectedSubject.name + " flashcards", cardsToSeparatorText(cards, " — ", "\n")).then(result => {
+        if (result === "shared") showToast("Shared");else if (result === "copied") showToast("Couldn't open share sheet — copied instead");else if (result === "failed") showToast("Couldn't share or copy");
+      });
+    }
+  };
+
+  // Exports one subject (plus its sub-subjects) as a standalone,
+  // re-importable data file — the "archive to free up space, bring back
+  // later" workflow. Distinct from the full-database export/import pair:
+  // this one is scoped, and importing it merges in rather than replacing
+  // everything.
+  const exportSubjectAsDataFile = subjectId => {
+    const subject = data.subjects.find(s => s.id === subjectId);
+    if (!subject) return;
+    const subjectIds = [subjectId, ...data.subjects.filter(s => s.parentId === subjectId).map(s => s.id)];
+    const subjectsToExport = data.subjects.filter(s => subjectIds.includes(s.id));
+    const notesToExport = data.notes.filter(n => subjectIds.includes(n.subjectId));
+    const cardsToExport = data.cards.filter(c => subjectIds.includes(c.subjectId));
+    const usedTagIds = new Set();
+    notesToExport.forEach(n => (n.tagIds || []).forEach(id => usedTagIds.add(id)));
+    const tagsToExport = data.tags.filter(t => usedTagIds.has(t.id));
+    const payload = {
+      subjects: subjectsToExport,
+      tags: tagsToExport,
+      notes: notesToExport,
+      cards: cardsToExport
+    };
+    const filename = `brainly-subject-${slug(subject.name)}-${nowISO().replace(/[:.]/g, "-")}.json`;
+    download(filename, JSON.stringify(payload, null, 2), "application/json;charset=utf-8");
+    showToast(`Exported "${subject.name}" — ${notesToExport.length} note${notesToExport.length === 1 ? "" : "s"}, ${cardsToExport.length} card${cardsToExport.length === 1 ? "" : "s"}`);
+  };
+
+  // Merges an imported file into the existing notebook rather than
+  // replacing it — the counterpart to exportSubjectAsDataFile. Upserts by
+  // ID (so re-importing an updated version of a subject you archived
+  // correctly updates it, not duplicates it), dedupes tags by name so
+  // re-importing doesn't create a second "labs" tag under a different ID,
+  // and promotes any sub-subject whose parent isn't present in the merged
+  // result to top-level, so it's never silently hidden.
+  const mergeImportedData = async parsed => {
+    const tagIdRemap = {};
+    const tagsToAdd = [];
+    parsed.tags.forEach(incomingTag => {
+      const existingMatch = data.tags.find(t => t.name.toLowerCase() === incomingTag.name.toLowerCase());
+      if (existingMatch) {
+        tagIdRemap[incomingTag.id] = existingMatch.id;
+      } else {
+        const alreadyQueued = tagsToAdd.find(t => t.name.toLowerCase() === incomingTag.name.toLowerCase());
+        if (alreadyQueued) {
+          tagIdRemap[incomingTag.id] = alreadyQueued.id;
+        } else {
+          tagIdRemap[incomingTag.id] = incomingTag.id;
+          tagsToAdd.push(incomingTag);
+        }
+      }
+    });
+    const remapTagIds = tagIds => [...new Set((tagIds || []).map(id => tagIdRemap[id] || id))];
+    const mergeArrayById = (existing, incoming) => {
+      const incomingIds = new Set(incoming.map(item => item.id));
+      const kept = existing.filter(item => !incomingIds.has(item.id));
+      return [...kept, ...incoming];
+    };
+    const remappedNotes = parsed.notes.map(n => ({
+      ...n,
+      tagIds: remapTagIds(n.tagIds)
+    }));
+    let mergedSubjects = mergeArrayById(data.subjects, parsed.subjects);
+    const mergedSubjectIds = new Set(mergedSubjects.map(s => s.id));
+    mergedSubjects = mergedSubjects.map(s => s.parentId && !mergedSubjectIds.has(s.parentId) ? {
+      ...s,
+      parentId: null
+    } : s);
+    const merged = {
+      ...data,
+      subjects: mergedSubjects,
+      tags: [...data.tags, ...tagsToAdd],
+      notes: mergeArrayById(data.notes, remappedNotes),
+      cards: mergeArrayById(data.cards, parsed.cards)
+    };
+    await persist(merged);
+  };
+
+  // ---- Card handlers ----
+
+  const addCardsToDeck = async candidates => {
+    if (!selectedSubjectId) return;
+    const now = nowISO();
+    const newCards = candidates.map(c => ({
+      id: uid(),
+      subjectId: selectedSubjectId,
+      front: c.front,
+      back: c.back,
+      sourceNoteIds: [],
+      box: 1,
+      dueDate: now,
+      starred: false,
+      timesCorrect: 0,
+      timesWrong: 0,
+      createdAt: now
+    }));
+    await persist({
+      ...data,
+      cards: [...data.cards, ...newCards]
+    });
+    showToast(`Added ${newCards.length} card${newCards.length === 1 ? "" : "s"} to deck`);
+  };
+  const addOcclusionCards = async (partials, linkedNoteId) => {
+    if (!selectedSubjectId) return;
+    const now = nowISO();
+    const noteId = linkedNoteId || occlusionSourceNoteId;
+    const newCards = partials.map(p => ({
+      id: uid(),
+      subjectId: selectedSubjectId,
+      front: "",
+      back: p.back,
+      frontImage: p.frontImage,
+      backImage: p.backImage,
+      sourceNoteIds: noteId ? [noteId] : [],
+      box: 1,
+      dueDate: now,
+      starred: false,
+      timesCorrect: 0,
+      timesWrong: 0,
+      createdAt: now
+    }));
+    await persist({
+      ...data,
+      cards: [...data.cards, ...newCards]
+    });
+    setShowOcclusion(false);
+    setOcclusionSeedImage(null);
+    setOcclusionSourceNoteId(null);
+    showToast(`Created ${newCards.length} occlusion card${newCards.length === 1 ? "" : "s"}`);
+  };
+  const answerCard = async (cardId, correct) => {
+    const next = {
+      ...data,
+      cards: data.cards.map(c => {
+        if (c.id !== cardId) return c;
+        if (correct) {
+          const box = Math.min(c.box + 1, 5);
+          return {
+            ...c,
+            box,
+            dueDate: addDays(BOX_INTERVAL_DAYS[box]),
+            timesCorrect: c.timesCorrect + 1
+          };
+        }
+        return {
+          ...c,
+          box: 1,
+          dueDate: addDays(BOX_INTERVAL_DAYS[1]),
+          timesWrong: c.timesWrong + 1
+        };
+      })
+    };
+    await persist(next);
+  };
+  const toggleStar = async cardId => {
+    await persist({
+      ...data,
+      cards: data.cards.map(c => c.id === cardId ? {
+        ...c,
+        starred: !c.starred
+      } : c)
+    });
+  };
+  const updateCard = async (cardId, front, back) => {
+    await persist({
+      ...data,
+      cards: data.cards.map(c => c.id === cardId ? {
+        ...c,
+        front,
+        back
+      } : c)
+    });
+    setEditingCard(null);
+    showToast("Card updated");
+  };
+  const deleteCard = cardId => {
+    askConfirm("Delete this card?", async () => {
+      await persist({
+        ...data,
+        cards: data.cards.filter(c => c.id !== cardId)
+      });
+      showToast("Card deleted");
+    });
+  };
+  const toggleTagFilter = id => {
+    setSelectedTagIds(cur => cur.includes(id) ? cur.filter(t => t !== id) : [...cur, id]);
+  };
+  const toggleCardSelection = id => {
+    setManualSelectedCardIds(cur => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);else next.add(id);
+      return next;
+    });
+  };
+  const clearCardSelection = () => setManualSelectedCardIds(new Set());
+  const toggleTheme = async () => {
+    const next = theme === "light" ? "dark" : "light";
+    setTheme(next);
+    try {
+      await storage.set(THEME_KEY, next);
+    } catch (e) {
+      // theme still applies for this session even if it doesn't persist
+    }
+  };
+  const toggleReminders = async () => {
+    if (remindersOn) {
+      setRemindersOn(false);
+      try {
+        await storage.set(REMINDERS_KEY, "off");
+      } catch (e) {}
+      return;
+    }
+    if (typeof Notification === "undefined") {
+      showToast("This browser doesn't support notifications.");
+      return;
+    }
+    let permission = Notification.permission;
+    if (permission === "default") {
+      permission = await Notification.requestPermission();
+    }
+    if (permission !== "granted") {
+      showToast("Notifications are blocked — enable them in your browser/site settings to use this.");
+      return;
+    }
+    setRemindersOn(true);
+    try {
+      await storage.set(REMINDERS_KEY, "on");
+    } catch (e) {}
+    showToast("Study reminders on — you'll get a nudge while Brainly is open and cards are due.");
+  };
+
+  // Lets a native wrapper (the Android app) schedule background reminders; no-op on the web.
+  useEffect(() => {
+    if (window.brainlyOnDueChange) window.brainlyOnDueChange(remindersOn, allDueCards.length);
+  }, [remindersOn, allDueCards.length]);
+
+  // Fires a local notification when cards are overdue. Only works while this
+  // tab/app is actually open and running — a static site with no backend
+  // can't send a true push notification while the app is fully closed.
+  useEffect(() => {
+    if (!remindersOn || typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    const notifyIfDue = () => {
+      if (allDueCards.length > 0 && document.visibilityState !== "visible") {
+        try {
+          new Notification("Brainly", {
+            body: `${allDueCards.length} card${allDueCards.length === 1 ? "" : "s"} due for review`
+          });
+        } catch (e) {
+          // notification construction can fail in some contexts; fail silently
+        }
+      }
+    };
+    const interval = setInterval(notifyIfDue, 30 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [remindersOn, allDueCards.length]);
+  if (!ready) {
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontFamily: "'Inter', sans-serif",
+        padding: 40,
+        color: "#8B87A6"
+      }
+    }, "loading brainly\u2026");
+  }
+  if (pinLockAvailable() && data.security && data.security.enabled && !unlocked) {
+    return /*#__PURE__*/React.createElement("div", {
+      className: "brainly-root" + (theme === "dark" ? " dark" : "")
+    }, /*#__PURE__*/React.createElement(Styles, null), /*#__PURE__*/React.createElement(LockScreen, {
+      pinHash: data.security.pinHash,
+      onUnlock: () => setUnlocked(true)
+    }));
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    className: "brainly-root" + (theme === "dark" ? " dark" : "")
+  }, /*#__PURE__*/React.createElement(Styles, null), /*#__PURE__*/React.createElement("aside", {
+    className: "sidebar"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "brand"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "brand-mark"
+  }, "\u2726"), /*#__PURE__*/React.createElement("span", {
+    className: "brand-name"
+  }, "Brainly")), /*#__PURE__*/React.createElement("div", {
+    className: "brand-sub"
+  }, "notes, tags & cards that stick"), /*#__PURE__*/React.createElement("button", {
+    className: "home-nav-btn" + (!selectedSubjectId ? " active" : ""),
+    onClick: () => {
+      setSelectedSubjectId(null);
+      setSelectedTagIds([]);
+    }
+  }, "\u2302 Home"), /*#__PURE__*/React.createElement("button", {
+    className: "home-nav-btn" + (showFilesPage ? " active" : ""),
+    onClick: () => {
+      setSelectedSubjectId(FILES_VIEW);
+      setSelectedTagIds([]);
+    }
+  }, "\uD83D\uDCC1 Files"), /*#__PURE__*/React.createElement("div", {
+    className: "subject-list"
+  }, topSubjects.length === 0 && /*#__PURE__*/React.createElement("div", {
+    className: "empty-hint"
+  }, "No subjects yet. Start one below."), topSubjects.map(s => {
+    const children = childSubjects(s.id);
+    const hasChildren = children.length > 0;
+    const childIsSelected = children.some(c => c.id === selectedSubjectId);
+    const isExpanded = expandedSubjects.has(s.id) || childIsSelected;
+    return /*#__PURE__*/React.createElement("div", {
+      key: s.id
+    }, /*#__PURE__*/React.createElement("button", {
+      className: "subject-item" + (s.id === selectedSubjectId ? " active" : ""),
+      style: {
+        "--accent": s.color
+      },
+      onClick: () => {
+        setSelectedSubjectId(s.id);
+        setSelectedTagIds([]);
+        setQuery("");
         setStudyScope("due");
         setSelectedNoteFilter(null);
         setManualSelectedCardIds(new Set());
-        setNewSubjectName("");
-        setNewSubjectParentId(null);
-        setShowNewSubject(false);
-    };
-    const deleteSubject = (id) => {
-        const children = childSubjects(id);
-        const warnExtra = children.length ? ` and ${children.length} sub-subject${children.length === 1 ? "" : "s"}` : "";
-        askConfirm(`Delete this subject${warnExtra}, along with all its notes and cards? This can't be undone.`, async () => {
-            const idsToRemove = new Set([id, ...children.map((c) => c.id)]);
-            const next = {
-                ...data,
-                subjects: data.subjects.filter((s) => !idsToRemove.has(s.id)),
-                notes: data.notes.filter((n) => !idsToRemove.has(n.subjectId)),
-                cards: data.cards.filter((c) => !idsToRemove.has(c.subjectId)),
-            };
-            await persist(next);
-            if (idsToRemove.has(selectedSubjectId)) {
-                setSelectedSubjectId(null);
-                setSelectedTagIds([]);
-            }
-            showToast("Subject deleted");
-        });
-    };
-    // ---- Note handlers ----
-    const resolveTagIds = (names, currentTags) => {
-        const tags = [...currentTags];
-        const ids = [];
-        names.forEach((rawName) => {
-            const name = rawName.trim();
-            if (!name)
-                return;
-            let existing = tags.find((t) => t.name.toLowerCase() === name.toLowerCase());
-            if (!existing) {
-                existing = { id: uid(), name };
-                tags.push(existing);
-            }
-            ids.push(existing.id);
-        });
-        return { tags, ids: [...new Set(ids)] };
-    };
-    const toggleNoteSelection = (id) => {
-        setSelectedNoteIdsForBulk((cur) => {
-            const next = new Set(cur);
-            if (next.has(id))
-                next.delete(id);
-            else
-                next.add(id);
-            return next;
-        });
-    };
-    const applyBulkTag = async (tagNamesToAdd) => {
-        if (selectedNoteIdsForBulk.size === 0 || tagNamesToAdd.length === 0)
-            return;
-        const { tags, ids: newTagIds } = resolveTagIds(tagNamesToAdd, data.tags);
-        const notes = data.notes.map((n) => selectedNoteIdsForBulk.has(n.id)
-            ? { ...n, tagIds: [...new Set([...n.tagIds, ...newTagIds])], updatedAt: nowISO() }
-            : n);
-        await persist({ ...data, tags, notes });
-        showToast(`Added tag${tagNamesToAdd.length === 1 ? "" : "s"} to ${selectedNoteIdsForBulk.size} note${selectedNoteIdsForBulk.size === 1 ? "" : "s"}`);
-        setShowBulkTag(false);
-        setSelectedNoteIdsForBulk(new Set());
-        setNoteSelectMode(false);
-    };
-    // Moves a batch of selected notes (and any cards created from them) to a
-    // different subject in one operation — how splitting an over-large
-    // subject into smaller sub-subjects actually happens: select the notes
-    // that belong together, move them into a freshly-created sub-subject,
-    // then archive that sub-subject on its own once it's not being studied.
-    const applyBulkMove = async (mode, value) => {
-        if (selectedNoteIdsForBulk.size === 0 || !value)
-            return;
-        let targetSubjectId = value;
-        let subjects = data.subjects;
-        if (mode === "new") {
-            const parentId = selectedSubject.parentId || selectedSubject.id; // nest as a SIBLING of the current view, never a grandchild
-            const newSubject = { id: uid(), name: value, color: selectedSubject.color, parentId, createdAt: nowISO() };
-            subjects = [...data.subjects, newSubject];
-            targetSubjectId = newSubject.id;
-        }
-        const notes = data.notes.map((n) => selectedNoteIdsForBulk.has(n.id) ? { ...n, subjectId: targetSubjectId, updatedAt: nowISO() } : n);
-        const cards = data.cards.map((c) => (c.sourceNoteIds || []).some((nid) => selectedNoteIdsForBulk.has(nid)) ? { ...c, subjectId: targetSubjectId } : c);
-        const count = selectedNoteIdsForBulk.size;
-        await persist({ ...data, subjects, notes, cards });
-        showToast(`Moved ${count} note${count === 1 ? "" : "s"}`);
-        setShowBulkMove(false);
-        setSelectedNoteIdsForBulk(new Set());
-        setNoteSelectMode(false);
-    };
-    const saveNote = async (targetNote, { title, bodyHTML, tagNames, images, color, subjectId, linkedNoteIds }) => {
-        const targetSubjectId = subjectId || (targetNote && targetNote.subjectId) || selectedSubjectId;
-        if (!targetSubjectId)
-            return;
-        const { tags, ids } = resolveTagIds(tagNames, data.tags);
-        let notes;
-        let cards = data.cards;
-        let savedNoteId;
-        if (targetNote && targetNote.id) {
-            savedNoteId = targetNote.id;
-            const moved = targetSubjectId !== targetNote.subjectId;
-            notes = data.notes.map((n) => n.id === targetNote.id
-                ? { ...n, title, bodyHTML, tagIds: ids, images, color, subjectId: targetSubjectId, linkedNoteIds: linkedNoteIds || [], updatedAt: nowISO() }
-                : n);
-            if (moved) {
-                cards = data.cards.map((c) => (c.sourceNoteIds || []).includes(targetNote.id) ? { ...c, subjectId: targetSubjectId } : c);
-            }
-        }
-        else {
-            savedNoteId = uid();
-            const note = {
-                id: savedNoteId,
-                subjectId: targetSubjectId,
-                title: title || "Untitled",
-                bodyHTML,
-                tagIds: ids,
-                images: images || [],
-                color: color || null,
-                linkedNoteIds: linkedNoteIds || [],
-                createdAt: nowISO(),
-                updatedAt: nowISO(),
-            };
-            notes = [...data.notes, note];
-        }
-        const sync = syncAutoCardsFromNote(cards, savedNoteId, targetSubjectId, bodyHTML, htmlToPlainText, nowISO, uid);
-        cards = sync.cards;
-        await persist({ ...data, tags, notes, cards });
-        const bits = [];
-        if (sync.addedCount)
-            bits.push(`${sync.addedCount} card${sync.addedCount === 1 ? "" : "s"} linked`);
-        if (sync.removedCount)
-            bits.push(`${sync.removedCount} removed`);
-        showToast("Note saved" + (bits.length ? " — " + bits.join(", ") : ""));
-        return savedNoteId;
-    };
-    const quickAddNote = async (title, bodyHTML, tagNames, color, images) => {
-        if (!selectedSubjectId || !htmlToPlainText(bodyHTML).trim())
-            return;
-        const { tags, ids } = resolveTagIds(tagNames, data.tags);
-        const now = nowISO();
-        const noteId = uid();
-        const note = {
-            id: noteId,
-            subjectId: selectedSubjectId,
-            title: (title || "").trim(),
-            bodyHTML,
-            tagIds: ids,
-            images: images || [],
-            color: color || null,
-            linkedNoteIds: [],
-            createdAt: now,
-            updatedAt: now,
-        };
-        const sync = syncAutoCardsFromNote(data.cards, noteId, selectedSubjectId, bodyHTML, htmlToPlainText, nowISO, uid);
-        await persist({ ...data, tags, notes: [...data.notes, note], cards: sync.cards });
-        showToast(sync.addedCount ? `Note added — ${sync.addedCount} card${sync.addedCount === 1 ? "" : "s"} linked` : "Note added");
-    };
-    const deleteNote = (id) => {
-        askConfirm("Delete this note?", async () => {
-            const notes = data.notes
-                .filter((n) => n.id !== id)
-                .map((n) => (n.linkedNoteIds || []).includes(id)
-                ? { ...n, linkedNoteIds: n.linkedNoteIds.filter((lid) => lid !== id) }
-                : n);
-            await persist({ ...data, notes });
-            showToast("Note deleted");
-        });
-    };
-    const navigateToNote = (noteId) => {
-        const target = data.notes.find((n) => n.id === noteId);
-        if (!target)
-            return;
-        setSelectedSubjectId(target.subjectId);
+      }
+    }, hasChildren && /*#__PURE__*/React.createElement("span", {
+      className: "subject-expand-toggle" + (isExpanded ? " expanded" : ""),
+      onClick: e => {
+        e.stopPropagation();
+        toggleSubjectExpanded(s.id);
+      }
+    }, "\u25B8"), /*#__PURE__*/React.createElement("span", {
+      className: "dot"
+    }), /*#__PURE__*/React.createElement("span", {
+      className: "subject-label"
+    }, s.name), /*#__PURE__*/React.createElement("span", {
+      className: "subject-count"
+    }, data.notes.filter(n => n.subjectId === s.id).length)), hasChildren && isExpanded && /*#__PURE__*/React.createElement("div", {
+      className: "subject-children"
+    }, children.map(c => /*#__PURE__*/React.createElement("button", {
+      key: c.id,
+      className: "subject-item child" + (c.id === selectedSubjectId ? " active" : ""),
+      style: {
+        "--accent": c.color
+      },
+      onClick: () => {
+        setSelectedSubjectId(c.id);
         setSelectedTagIds([]);
-        setTab("notes");
-        setEditingNote(target);
-        setSplitPane(null);
-    };
-    const openSplitNote = (noteId) => {
-        const target = data.notes.find((n) => n.id === noteId);
-        if (!target)
-            return;
-        setSplitPane({ type: "note", note: target });
-    };
-    const openSplitCards = (noteId, subjectId) => {
-        setSplitPane({ type: "cards", noteId, subjectId, scope: "note" });
-    };
-    const splitPaneCards = useMemo(() => {
-        if (!splitPane || splitPane.type !== "cards")
-            return [];
-        if (splitPane.scope === "subject") {
-            return data.cards.filter((c) => c.subjectId === splitPane.subjectId);
-        }
-        return data.cards.filter((c) => (c.sourceNoteIds || []).includes(splitPane.noteId));
-    }, [splitPane, data.cards]);
-    const createCardFromHighlight = async (noteId, front, back) => {
-        if (!noteId || !selectedSubjectId)
-            return;
-        const now = nowISO();
-        const card = {
-            id: uid(),
-            subjectId: selectedSubjectId,
-            front,
-            back,
-            sourceNoteIds: [noteId],
-            box: 1,
-            dueDate: now,
-            starred: false,
-            timesCorrect: 0,
-            timesWrong: 0,
-            createdAt: now,
-        };
-        await persist({ ...data, cards: [...data.cards, card] });
-        showToast("Card created from highlight");
-    };
-    // Bulk version for AI-generated flashcards — deliberately NOT
-    // autoFromNote (that flag is reserved for the "::"-syntax cards that
-    // live-resync on every note save; these are a one-time generation,
-    // and setting it would risk this batch being silently deleted the
-    // next time the note is saved if it happens to contain no "::"
-    // lines). sourceNoteIds is still set for provenance, same as every
-    // other card-creation path.
-    const createCardsFromAI = async (noteId, subjectIdForCards, cardPairs) => {
-        if (!noteId || !subjectIdForCards || !cardPairs.length)
-            return;
-        const now = nowISO();
-        const newCards = cardPairs.map((c) => ({
-            id: uid(),
-            subjectId: subjectIdForCards,
-            front: c.front,
-            back: c.back,
-            sourceNoteIds: [noteId],
-            box: 1,
-            dueDate: now,
-            starred: false,
-            timesCorrect: 0,
-            timesWrong: 0,
-            createdAt: now,
-        }));
-        await persist({ ...data, cards: [...data.cards, ...newCards] });
-        showToast(`${newCards.length} card${newCards.length === 1 ? "" : "s"} added`);
-    };
-    // ---- Export / share ----
-    const exportNote = (note, mode) => {
-        const tagNames = note.tagIds.map(tagName);
-        if (mode === "copy") {
-            copyText(noteToMarkdown(note, selectedSubject?.name, tagNames)).then((ok) => showToast(ok ? "Copied as Markdown" : "Couldn't copy"));
-        }
-        else if (mode === "download") {
-            download(`${slug(note.title)}.md`, noteToMarkdown(note, selectedSubject?.name, tagNames));
-            showToast("Downloaded .md");
-        }
-        else if (mode === "pdf") {
-            const imgHTML = (note.images || [])
-                .map((img) => `<img src="${img.dataUrl}" style="max-width:100%;border-radius:8px;margin-top:10px;" />`)
-                .join("");
-            printHTML(note.title, `<h1>${note.title}</h1><div class="meta">${selectedSubject?.name || ""} ${tagNames.length ? "· " + tagNames.map((t) => "#" + t).join(" ") : ""}</div>${note.bodyHTML || ""}${imgHTML}`);
-        }
-        else if (mode === "share") {
-            shareText(note.title, noteToMarkdown(note, selectedSubject?.name, tagNames)).then((result) => {
-                if (result === "shared")
-                    showToast("Shared");
-                else if (result === "copied")
-                    showToast("Couldn't open share sheet — copied instead");
-                else if (result === "failed")
-                    showToast("Couldn't share or copy");
-            });
-        }
-    };
-    const exportSubjectNotes = (mode) => {
-        if (!selectedSubject)
-            return;
-        const subjNotes = data.notes.filter((n) => n.subjectId === selectedSubject.id);
-        if (mode === "md") {
-            const md = subjNotes
-                .map((n) => noteToMarkdown(n, selectedSubject.name, n.tagIds.map(tagName)))
-                .join("\n\n---\n\n");
-            download(`${slug(selectedSubject.name)}-all-notes.md`, md || `# ${selectedSubject.name}\n\n(no notes yet)`);
-            showToast(`Exported ${subjNotes.length} note${subjNotes.length === 1 ? "" : "s"}`);
-        }
-        else if (mode === "pdf") {
-            const bodyHTML = subjNotes
-                .map((n) => `<h1>${n.title}</h1><div class="meta">${n.tagIds.map((t) => "#" + tagName(t)).join(" ")}</div>${n.bodyHTML || ""}<hr/>`)
-                .join("");
-            printHTML(selectedSubject.name, bodyHTML || `<p>No notes yet in ${selectedSubject.name}.</p>`);
-        }
-    };
-    const exportSubjectCards = (mode) => {
-        if (!selectedSubject)
-            return;
-        const cards = data.cards.filter((c) => c.subjectId === selectedSubject.id);
-        if (mode === "md") {
-            download(`${slug(selectedSubject.name)}-cards.txt`, cardsToSeparatorText(cards, "\t", "\n"), "text/plain");
-            showToast(`Exported ${cards.length} card${cards.length === 1 ? "" : "s"} (tab-separated, Quizlet-ready)`);
-        }
-        else if (mode === "pdf") {
-            const bodyHTML = `<h1>${selectedSubject.name} — flashcards</h1>` +
-                cards
-                    .map((c) => c.frontImage
-                    ? `<div class="card"><img src="${c.frontImage}" style="max-width:100%;border-radius:8px;margin-bottom:8px;" /><div class="back">${c.back}</div></div>`
-                    : `<div class="card"><div class="front">${c.front}</div><div class="back">${c.back}</div></div>`)
-                    .join("");
-            printHTML(selectedSubject.name + " cards", bodyHTML || "<p>No cards yet.</p>");
-        }
-        else if (mode === "share") {
-            shareText(selectedSubject.name + " flashcards", cardsToSeparatorText(cards, " — ", "\n")).then((result) => {
-                if (result === "shared")
-                    showToast("Shared");
-                else if (result === "copied")
-                    showToast("Couldn't open share sheet — copied instead");
-                else if (result === "failed")
-                    showToast("Couldn't share or copy");
-            });
-        }
-    };
-    // Exports one subject (plus its sub-subjects) as a standalone,
-    // re-importable data file — the "archive to free up space, bring back
-    // later" workflow. Distinct from the full-database export/import pair:
-    // this one is scoped, and importing it merges in rather than replacing
-    // everything.
-    const exportSubjectAsDataFile = (subjectId) => {
-        const subject = data.subjects.find((s) => s.id === subjectId);
-        if (!subject)
-            return;
-        const subjectIds = [subjectId, ...data.subjects.filter((s) => s.parentId === subjectId).map((s) => s.id)];
-        const subjectsToExport = data.subjects.filter((s) => subjectIds.includes(s.id));
-        const notesToExport = data.notes.filter((n) => subjectIds.includes(n.subjectId));
-        const cardsToExport = data.cards.filter((c) => subjectIds.includes(c.subjectId));
-        const usedTagIds = new Set();
-        notesToExport.forEach((n) => (n.tagIds || []).forEach((id) => usedTagIds.add(id)));
-        const tagsToExport = data.tags.filter((t) => usedTagIds.has(t.id));
-        const payload = { subjects: subjectsToExport, tags: tagsToExport, notes: notesToExport, cards: cardsToExport };
-        const filename = `brainly-subject-${slug(subject.name)}-${nowISO().replace(/[:.]/g, "-")}.json`;
-        download(filename, JSON.stringify(payload, null, 2), "application/json;charset=utf-8");
-        showToast(`Exported "${subject.name}" — ${notesToExport.length} note${notesToExport.length === 1 ? "" : "s"}, ${cardsToExport.length} card${cardsToExport.length === 1 ? "" : "s"}`);
-    };
-    // Merges an imported file into the existing notebook rather than
-    // replacing it — the counterpart to exportSubjectAsDataFile. Upserts by
-    // ID (so re-importing an updated version of a subject you archived
-    // correctly updates it, not duplicates it), dedupes tags by name so
-    // re-importing doesn't create a second "labs" tag under a different ID,
-    // and promotes any sub-subject whose parent isn't present in the merged
-    // result to top-level, so it's never silently hidden.
-    const mergeImportedData = async (parsed) => {
-        const tagIdRemap = {};
-        const tagsToAdd = [];
-        parsed.tags.forEach((incomingTag) => {
-            const existingMatch = data.tags.find((t) => t.name.toLowerCase() === incomingTag.name.toLowerCase());
-            if (existingMatch) {
-                tagIdRemap[incomingTag.id] = existingMatch.id;
-            }
-            else {
-                const alreadyQueued = tagsToAdd.find((t) => t.name.toLowerCase() === incomingTag.name.toLowerCase());
-                if (alreadyQueued) {
-                    tagIdRemap[incomingTag.id] = alreadyQueued.id;
-                }
-                else {
-                    tagIdRemap[incomingTag.id] = incomingTag.id;
-                    tagsToAdd.push(incomingTag);
-                }
-            }
-        });
-        const remapTagIds = (tagIds) => [...new Set((tagIds || []).map((id) => tagIdRemap[id] || id))];
-        const mergeArrayById = (existing, incoming) => {
-            const incomingIds = new Set(incoming.map((item) => item.id));
-            const kept = existing.filter((item) => !incomingIds.has(item.id));
-            return [...kept, ...incoming];
-        };
-        const remappedNotes = parsed.notes.map((n) => ({ ...n, tagIds: remapTagIds(n.tagIds) }));
-        let mergedSubjects = mergeArrayById(data.subjects, parsed.subjects);
-        const mergedSubjectIds = new Set(mergedSubjects.map((s) => s.id));
-        mergedSubjects = mergedSubjects.map((s) => s.parentId && !mergedSubjectIds.has(s.parentId) ? { ...s, parentId: null } : s);
-        const merged = {
-            ...data,
-            subjects: mergedSubjects,
-            tags: [...data.tags, ...tagsToAdd],
-            notes: mergeArrayById(data.notes, remappedNotes),
-            cards: mergeArrayById(data.cards, parsed.cards),
-        };
-        await persist(merged);
-    };
-    // ---- Card handlers ----
-    const addCardsToDeck = async (candidates) => {
-        if (!selectedSubjectId)
-            return;
-        const now = nowISO();
-        const newCards = candidates.map((c) => ({
-            id: uid(),
-            subjectId: selectedSubjectId,
-            front: c.front,
-            back: c.back,
-            sourceNoteIds: [],
-            box: 1,
-            dueDate: now,
-            starred: false,
-            timesCorrect: 0,
-            timesWrong: 0,
-            createdAt: now,
-        }));
-        await persist({ ...data, cards: [...data.cards, ...newCards] });
-        showToast(`Added ${newCards.length} card${newCards.length === 1 ? "" : "s"} to deck`);
-    };
-    const addOcclusionCards = async (partials, linkedNoteId) => {
-        if (!selectedSubjectId)
-            return;
-        const now = nowISO();
-        const noteId = linkedNoteId || occlusionSourceNoteId;
-        const newCards = partials.map((p) => ({
-            id: uid(),
-            subjectId: selectedSubjectId,
-            front: "",
-            back: p.back,
-            frontImage: p.frontImage,
-            backImage: p.backImage,
-            sourceNoteIds: noteId ? [noteId] : [],
-            box: 1,
-            dueDate: now,
-            starred: false,
-            timesCorrect: 0,
-            timesWrong: 0,
-            createdAt: now,
-        }));
-        await persist({ ...data, cards: [...data.cards, ...newCards] });
-        setShowOcclusion(false);
-        setOcclusionSeedImage(null);
-        setOcclusionSourceNoteId(null);
-        showToast(`Created ${newCards.length} occlusion card${newCards.length === 1 ? "" : "s"}`);
-    };
-    const answerCard = async (cardId, correct) => {
-        const next = {
-            ...data,
-            cards: data.cards.map((c) => {
-                if (c.id !== cardId)
-                    return c;
-                if (correct) {
-                    const box = Math.min(c.box + 1, 5);
-                    return { ...c, box, dueDate: addDays(BOX_INTERVAL_DAYS[box]), timesCorrect: c.timesCorrect + 1 };
-                }
-                return { ...c, box: 1, dueDate: addDays(BOX_INTERVAL_DAYS[1]), timesWrong: c.timesWrong + 1 };
-            }),
-        };
-        await persist(next);
-    };
-    const toggleStar = async (cardId) => {
-        await persist({
-            ...data,
-            cards: data.cards.map((c) => (c.id === cardId ? { ...c, starred: !c.starred } : c)),
-        });
-    };
-    const updateCard = async (cardId, front, back) => {
-        await persist({
-            ...data,
-            cards: data.cards.map((c) => (c.id === cardId ? { ...c, front, back } : c)),
-        });
-        setEditingCard(null);
-        showToast("Card updated");
-    };
-    const deleteCard = (cardId) => {
-        askConfirm("Delete this card?", async () => {
-            await persist({ ...data, cards: data.cards.filter((c) => c.id !== cardId) });
-            showToast("Card deleted");
-        });
-    };
-    const toggleTagFilter = (id) => {
-        setSelectedTagIds((cur) => (cur.includes(id) ? cur.filter((t) => t !== id) : [...cur, id]));
-    };
-    const toggleCardSelection = (id) => {
-        setManualSelectedCardIds((cur) => {
-            const next = new Set(cur);
-            if (next.has(id))
-                next.delete(id);
-            else
-                next.add(id);
-            return next;
-        });
-    };
-    const clearCardSelection = () => setManualSelectedCardIds(new Set());
-    const toggleTheme = async () => {
-        const next = theme === "light" ? "dark" : "light";
-        setTheme(next);
-        try {
-            await storage.set(THEME_KEY, next);
-        }
-        catch (e) {
-            // theme still applies for this session even if it doesn't persist
-        }
-    };
-    const toggleReminders = async () => {
-        if (remindersOn) {
-            setRemindersOn(false);
-            try {
-                await storage.set(REMINDERS_KEY, "off");
-            }
-            catch (e) { }
-            return;
-        }
-        if (typeof Notification === "undefined") {
-            showToast("This browser doesn't support notifications.");
-            return;
-        }
-        let permission = Notification.permission;
-        if (permission === "default") {
-            permission = await Notification.requestPermission();
-        }
-        if (permission !== "granted") {
-            showToast("Notifications are blocked — enable them in your browser/site settings to use this.");
-            return;
-        }
-        setRemindersOn(true);
-        try {
-            await storage.set(REMINDERS_KEY, "on");
-        }
-        catch (e) { }
-        showToast("Study reminders on — you'll get a nudge while Brainly is open and cards are due.");
-    };
-    const saveOpenRouterKey = async () => {
-        const trimmed = openRouterKeyInput.trim();
-        setOpenRouterKey(trimmed);
-        try {
-            await storage.set(OPENROUTER_KEY_STORAGE_KEY, trimmed);
-            showToast(trimmed ? "OpenRouter key saved" : "OpenRouter key cleared");
-        }
-        catch (e) {
-            showToast("Couldn't save the key — try again.");
-        }
-    };
-    const handleAskLibrary = async () => {
-        if (!openRouterKey) {
-            setLibraryAskError("Add your OpenRouter API key in Settings first.");
-            return;
-        }
-        if (!libraryAskQuestion.trim())
-            return;
-        const scopedNotes = libraryAskScope === "all" ? data.notes : data.notes.filter((n) => n.subjectId === libraryAskScope);
-        if (!scopedNotes.length) {
-            setLibraryAskError("No notes in that scope yet.");
-            return;
-        }
-        setLibraryAskBusy(true);
-        setLibraryAskError("");
-        setLibraryAskAnswer("");
-        try {
-            const { contextText, includedCount, totalCount } = buildLibraryContext(scopedNotes, htmlToPlainText);
-            setLibraryAskCoverage({ includedCount, totalCount });
-            const result = await callOpenRouter(openRouterKey, buildAskPrompt(libraryAskQuestion.trim(), contextText));
-            setLibraryAskAnswer(result.trim());
-        }
-        catch (e) {
-            setLibraryAskError(e.message);
-        }
-        finally {
-            setLibraryAskBusy(false);
-        }
-    };
-    // Fires a local notification when cards are overdue. Only works while this
-    // tab/app is actually open and running — a static site with no backend
-    // can't send a true push notification while the app is fully closed.
-    useEffect(() => {
-        if (!remindersOn || typeof Notification === "undefined" || Notification.permission !== "granted")
-            return;
-        const notifyIfDue = () => {
-            if (allDueCards.length > 0 && document.visibilityState !== "visible") {
-                try {
-                    new Notification("Brainly", { body: `${allDueCards.length} card${allDueCards.length === 1 ? "" : "s"} due for review` });
-                }
-                catch (e) {
-                    // notification construction can fail in some contexts; fail silently
-                }
-            }
-        };
-        const interval = setInterval(notifyIfDue, 30 * 60 * 1000);
-        return () => clearInterval(interval);
-    }, [remindersOn, allDueCards.length]);
-    if (!ready) {
-        return (React.createElement("div", { style: { fontFamily: "'Inter', sans-serif", padding: 40, color: "#8B87A6" } }, "loading brainly\u2026"));
+        setQuery("");
+        setStudyScope("due");
+        setSelectedNoteFilter(null);
+        setManualSelectedCardIds(new Set());
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "dot"
+    }), /*#__PURE__*/React.createElement("span", {
+      className: "subject-label"
+    }, c.name), /*#__PURE__*/React.createElement("span", {
+      className: "subject-count"
+    }, data.notes.filter(n => n.subjectId === c.id).length)))));
+  })), showNewSubject ? /*#__PURE__*/React.createElement("div", {
+    className: "new-subject-form"
+  }, /*#__PURE__*/React.createElement("input", {
+    autoFocus: true,
+    placeholder: "Subject name",
+    value: newSubjectName,
+    onChange: e => setNewSubjectName(e.target.value),
+    onKeyDown: e => e.key === "Enter" && createSubject()
+  }), topSubjects.length > 0 && /*#__PURE__*/React.createElement("select", {
+    className: "parent-select",
+    value: newSubjectParentId || "",
+    onChange: e => setNewSubjectParentId(e.target.value || null)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "No parent (top-level)"), topSubjects.map(s => /*#__PURE__*/React.createElement("option", {
+    key: s.id,
+    value: s.id
+  }, "Sub-subject of ", s.name))), /*#__PURE__*/React.createElement("div", {
+    className: "color-row"
+  }, SUBJECT_COLORS.map(c => /*#__PURE__*/React.createElement("button", {
+    key: c.hex,
+    className: "swatch" + (newSubjectColor === c.hex ? " selected" : ""),
+    style: {
+      background: c.hex
+    },
+    title: c.name,
+    onClick: () => setNewSubjectColor(c.hex)
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "form-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost",
+    onClick: () => setShowNewSubject(false)
+  }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    onClick: createSubject
+  }, "Add"))) : /*#__PURE__*/React.createElement("button", {
+    className: "add-subject-btn",
+    onClick: () => setShowNewSubject(true)
+  }, "+ New subject"), saveError && /*#__PURE__*/React.createElement("div", {
+    className: "save-error"
+  }, "Couldn't save \u2014 check storage/connection."), /*#__PURE__*/React.createElement("div", {
+    className: "sidebar-footer"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "icon-toggle-btn",
+    onClick: toggleTheme,
+    title: theme === "dark" ? "Switch to light" : "Switch to dark"
+  }, theme === "dark" ? "☀ Light" : "☾ Dark"), /*#__PURE__*/React.createElement("button", {
+    className: "icon-toggle-btn" + (remindersOn ? " on" : ""),
+    onClick: toggleReminders,
+    title: "Notify me about overdue cards while Brainly is open"
+  }, remindersOn ? "🔔 Reminders on" : "🔕 Reminders off"), pinLockAvailable() && /*#__PURE__*/React.createElement("div", {
+    className: "pin-lock-section"
+  }, !(data.security && data.security.enabled) ? /*#__PURE__*/React.createElement("button", {
+    className: "icon-toggle-btn",
+    onClick: () => setShowPinModal("set")
+  }, "\uD83D\uDD12 Set a passcode") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
+    className: "icon-toggle-btn on",
+    disabled: true
+  }, "\uD83D\uDD12 Passcode enabled"), /*#__PURE__*/React.createElement("div", {
+    className: "pin-lock-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small",
+    onClick: () => setShowPinModal("change")
+  }, "Change"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small",
+    onClick: () => setShowPinModal("remove")
+  }, "Remove")))))), /*#__PURE__*/React.createElement("main", {
+    className: "main"
+  }, allDueCards.length > 0 && /*#__PURE__*/React.createElement("button", {
+    className: "overdue-banner",
+    onClick: () => {
+      setCrossTagSession({
+        tagName: "Overdue across all subjects",
+        cards: allDueCards
+      });
+      setShowReview(true);
     }
-    if (pinLockAvailable() && data.security && data.security.enabled && !unlocked) {
-        return (React.createElement("div", { className: "brainly-root" + (theme === "dark" ? " dark" : "") },
-            React.createElement(Styles, null),
-            React.createElement(LockScreen, { pinHash: data.security.pinHash, onUnlock: () => setUnlocked(true) })));
+  }, /*#__PURE__*/React.createElement("span", null, "\u23F0 ", allDueCards.length, " card", allDueCards.length === 1 ? "" : "s", " overdue across your subjects"), /*#__PURE__*/React.createElement("span", {
+    className: "overdue-banner-cta"
+  }, "Review now \u2192")), showFilesPage ? /*#__PURE__*/React.createElement(FilesPage, {
+    exportBusy: deviceExportBusy,
+    onExport: exportEverythingToDevice,
+    importBusy: importBusy,
+    onImportFile: handleImportFile,
+    subjectImportBusy: subjectImportBusy,
+    onImportSubjectFile: handleImportSubjectFile,
+    kindleImportBusy: kindleImportBusy,
+    onKindleFile: handleKindleImportFile,
+    onPdfFile: handlePdfFilePicked,
+    mdImportBusy: mdImportBusy,
+    onMarkdownFile: handleMarkdownImportFile,
+    onAddArticle: () => setShowAddArticle(true)
+  }) : !selectedSubject ? /*#__PURE__*/React.createElement(Dashboard, {
+    subjects: data.subjects,
+    notes: data.notes,
+    weakSpots: weakSpots,
+    tagName: tagName,
+    onNavigate: (subjectId, tagId) => {
+      setSelectedSubjectId(subjectId);
+      setSelectedTagIds([tagId]);
+      setTab("study");
+    },
+    onNewSubject: () => setShowNewSubject(true),
+    globalTagStats: globalTagStats,
+    onStudyTag: (tagId, tagName2, mode) => {
+      const cards = cardsByTagAcrossSubjects(tagId);
+      if (cards.length === 0) return;
+      setCrossTagSession({
+        tagName: tagName2,
+        cards
+      });
+      if (mode === "match") setShowMatch(true);else setShowReview(true);
+    },
+    dueForecast: dueForecast,
+    onOpenNote: navigateToNote
+  }) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("header", {
+    className: "main-header"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "eyebrow",
+    style: {
+      color: selectedSubject.color
     }
-    return (React.createElement("div", { className: "brainly-root" + (theme === "dark" ? " dark" : "") },
-        React.createElement(Styles, null),
-        React.createElement("aside", { className: "sidebar" },
-            React.createElement("div", { className: "brand" },
-                React.createElement("span", { className: "brand-mark" }, "\u2726"),
-                React.createElement("span", { className: "brand-name" }, "Brainly")),
-            React.createElement("div", { className: "brand-sub" }, "notes, tags & cards that stick"),
-            React.createElement("button", { className: "home-nav-btn" + (!selectedSubjectId ? " active" : ""), onClick: () => {
-                    setSelectedSubjectId(null);
-                    setSelectedTagIds([]);
-                } }, "\u2302 Home"),
-            React.createElement("div", { className: "subject-list" },
-                topSubjects.length === 0 && React.createElement("div", { className: "empty-hint" }, "No subjects yet. Start one below."),
-                topSubjects.map((s) => {
-                    const children = childSubjects(s.id);
-                    const hasChildren = children.length > 0;
-                    const childIsSelected = children.some((c) => c.id === selectedSubjectId);
-                    const isExpanded = expandedSubjects.has(s.id) || childIsSelected;
-                    return (React.createElement("div", { key: s.id },
-                        React.createElement("button", { className: "subject-item" + (s.id === selectedSubjectId ? " active" : ""), style: { "--accent": s.color }, onClick: () => {
-                                setSelectedSubjectId(s.id);
-                                setSelectedTagIds([]);
-                                setQuery("");
-                                setStudyScope("due");
-                                setSelectedNoteFilter(null);
-                                setManualSelectedCardIds(new Set());
-                            } },
-                            hasChildren && (React.createElement("span", { className: "subject-expand-toggle" + (isExpanded ? " expanded" : ""), onClick: (e) => { e.stopPropagation(); toggleSubjectExpanded(s.id); } }, "\u25B8")),
-                            React.createElement("span", { className: "dot" }),
-                            React.createElement("span", { className: "subject-label" }, s.name),
-                            React.createElement("span", { className: "subject-count" }, data.notes.filter((n) => n.subjectId === s.id).length)),
-                        hasChildren && isExpanded && (React.createElement("div", { className: "subject-children" }, children.map((c) => (React.createElement("button", { key: c.id, className: "subject-item child" + (c.id === selectedSubjectId ? " active" : ""), style: { "--accent": c.color }, onClick: () => {
-                                setSelectedSubjectId(c.id);
-                                setSelectedTagIds([]);
-                                setQuery("");
-                                setStudyScope("due");
-                                setSelectedNoteFilter(null);
-                                setManualSelectedCardIds(new Set());
-                            } },
-                            React.createElement("span", { className: "dot" }),
-                            React.createElement("span", { className: "subject-label" }, c.name),
-                            React.createElement("span", { className: "subject-count" }, data.notes.filter((n) => n.subjectId === c.id).length))))))));
-                })),
-            showNewSubject ? (React.createElement("div", { className: "new-subject-form" },
-                React.createElement("input", { autoFocus: true, placeholder: "Subject name", value: newSubjectName, onChange: (e) => setNewSubjectName(e.target.value), onKeyDown: (e) => e.key === "Enter" && createSubject() }),
-                topSubjects.length > 0 && (React.createElement("select", { className: "parent-select", value: newSubjectParentId || "", onChange: (e) => setNewSubjectParentId(e.target.value || null) },
-                    React.createElement("option", { value: "" }, "No parent (top-level)"),
-                    topSubjects.map((s) => (React.createElement("option", { key: s.id, value: s.id },
-                        "Sub-subject of ",
-                        s.name))))),
-                React.createElement("div", { className: "color-row" }, SUBJECT_COLORS.map((c) => (React.createElement("button", { key: c.hex, className: "swatch" + (newSubjectColor === c.hex ? " selected" : ""), style: { background: c.hex }, title: c.name, onClick: () => setNewSubjectColor(c.hex) })))),
-                React.createElement("div", { className: "form-actions" },
-                    React.createElement("button", { className: "btn-ghost", onClick: () => setShowNewSubject(false) }, "Cancel"),
-                    React.createElement("button", { className: "btn-primary", onClick: createSubject }, "Add")))) : (React.createElement("button", { className: "add-subject-btn", onClick: () => setShowNewSubject(true) }, "+ New subject")),
-            saveError && React.createElement("div", { className: "save-error" }, "Couldn't save \u2014 check storage/connection."),
-            React.createElement("div", { className: "sidebar-footer" },
-                React.createElement("button", { className: "icon-toggle-btn", onClick: toggleTheme, title: theme === "dark" ? "Switch to light" : "Switch to dark" }, theme === "dark" ? "☀ Light" : "☾ Dark"),
-                React.createElement("button", { className: "icon-toggle-btn" + (remindersOn ? " on" : ""), onClick: toggleReminders, title: "Notify me about overdue cards while Brainly is open" }, remindersOn ? "🔔 Reminders on" : "🔕 Reminders off"),
-                driveIsAvailable() && (React.createElement("div", { className: "drive-sync-section" }, !driveConnected ? (React.createElement("button", { className: "icon-toggle-btn", onClick: connectDrive }, "\u2601 Connect Google Drive")) : (React.createElement(React.Fragment, null,
-                    React.createElement("div", { className: "drive-sync-status" },
-                        React.createElement("span", null, driveSyncing ? "☁ Syncing…" : "☁ Synced" + (driveLastSync ? " " + formatRelativeTime(driveLastSync) : "")),
-                        React.createElement("button", { className: "btn-ghost small", onClick: pullFromDriveNow, disabled: driveSyncing }, "Sync now")),
-                    driveError && React.createElement("p", { className: "drive-sync-error" }, driveError),
-                    React.createElement("button", { className: "icon-toggle-btn", onClick: disconnectDrive }, "Disconnect Drive"))))),
-                driveIsAvailable() && (React.createElement("div", { className: "drive-backup-section" },
-                    React.createElement("button", { className: "icon-toggle-btn", onClick: backupToDriveNow, disabled: backupBusy, title: "Save a dated snapshot to Drive, separate from auto-sync" }, backupBusy ? "📥 Saving backup…" : "📥 Backup now to Drive"),
-                    backupMessage && React.createElement("p", { className: "drive-backup-message" }, backupMessage))),
-                React.createElement("div", { className: "ai-settings-section" },
-                    React.createElement("label", { className: "ai-settings-label", htmlFor: "openrouter-key-input" }, "\uD83E\uDD16 OpenRouter API key"),
-                    React.createElement("div", { className: "ai-key-row" },
-                        React.createElement("input", { id: "openrouter-key-input", type: showOpenRouterKey ? "text" : "password", className: "url-input", placeholder: "sk-or-v1-\u2026", value: openRouterKeyInput, onChange: (e) => setOpenRouterKeyInput(e.target.value) }),
-                        React.createElement("button", { className: "btn-ghost small", onClick: () => setShowOpenRouterKey((v) => !v) }, showOpenRouterKey ? "Hide" : "Show")),
-                    React.createElement("button", { className: "btn-ghost small", onClick: saveOpenRouterKey, disabled: openRouterKeyInput.trim() === openRouterKey }, openRouterKey ? "Update key" : "Save key"),
-                    React.createElement("p", { className: "ai-settings-hint" }, "Powers Summarize, Ask, Format, and Auto-flashcards below. Stored only in this browser, sent directly to OpenRouter \u2014 never included in backups or exports. Get a free key at openrouter.ai/keys."),
-                    React.createElement("button", { className: "icon-toggle-btn", onClick: () => setShowAskLibrary(true), title: "Ask a question answered using your whole library (or one subject) as context" }, "\uD83D\uDD0D Ask your library")),
-                React.createElement("div", { className: "device-export-section" },
-                    React.createElement("button", { className: "icon-toggle-btn", onClick: exportEverythingToDevice, disabled: deviceExportBusy, title: "Save everything as one file \u2014 pick a plugged-in drive if your browser supports it, otherwise it downloads and you move it yourself" }, deviceExportBusy ? "💾 Exporting…" : "💾 Export everything to a device"),
-                    React.createElement("label", { className: "icon-toggle-btn file-label", title: "Restore from a file exported by this app \u2014 replaces everything currently here" },
-                        importBusy ? "📂 Reading file…" : "📂 Import from a file",
-                        React.createElement("input", { type: "file", accept: "application/json,.json", className: "visually-hidden-file", onChange: handleImportFile, disabled: importBusy })),
-                    React.createElement("label", { className: "icon-toggle-btn file-label", title: "Bring in a subject archived with 'Archive to file' \u2014 adds to what's here, doesn't touch anything else" },
-                        subjectImportBusy ? "📥 Reading file…" : "📥 Bring in a subject",
-                        React.createElement("input", { type: "file", accept: "application/json,.json", className: "visually-hidden-file", onChange: handleImportSubjectFile, disabled: subjectImportBusy })),
-                    React.createElement("label", { className: "icon-toggle-btn file-label", title: "Import a Kindle Notebook export (.html) or My Clippings.txt \u2014 lands in a 'Kindle Highlights' subject" },
-                        kindleImportBusy ? "📖 Reading file…" : "📖 Import Kindle highlights",
-                        React.createElement("input", { type: "file", accept: ".html,.htm,text/html,.txt,text/plain", className: "visually-hidden-file", onChange: handleKindleImportFile, disabled: kindleImportBusy })),
-                    React.createElement("label", { className: "icon-toggle-btn file-label", title: "Extract text (and optionally page images) from a PDF \u2014 lands in a 'PDF Imports' subject" },
-                        "\uD83D\uDCC4 Import PDF",
-                        React.createElement("input", { type: "file", accept: "application/pdf,.pdf", className: "visually-hidden-file", onChange: handlePdfFilePicked })),
-                    React.createElement("label", { className: "icon-toggle-btn file-label", title: "Import a .md file from Obsidian, Notion, or anywhere else \u2014 lands in an 'Imported Notes' subject" },
-                        mdImportBusy ? "📝 Reading file…" : "📝 Import .md file",
-                        React.createElement("input", { type: "file", accept: ".md,text/markdown,text/plain", className: "visually-hidden-file", onChange: handleMarkdownImportFile, disabled: mdImportBusy })),
-                    React.createElement("button", { className: "icon-toggle-btn", onClick: () => setShowAddArticle(true), title: "Save a web article by its URL \u2014 lands in a 'Saved Articles' subject" }, "\uD83D\uDD17 Save article by URL")),
-                pinLockAvailable() && (React.createElement("div", { className: "pin-lock-section" }, !(data.security && data.security.enabled) ? (React.createElement("button", { className: "icon-toggle-btn", onClick: () => setShowPinModal("set") }, "\uD83D\uDD12 Set a passcode")) : (React.createElement(React.Fragment, null,
-                    React.createElement("button", { className: "icon-toggle-btn on", disabled: true }, "\uD83D\uDD12 Passcode enabled"),
-                    React.createElement("div", { className: "pin-lock-actions" },
-                        React.createElement("button", { className: "btn-ghost small", onClick: () => setShowPinModal("change") }, "Change"),
-                        React.createElement("button", { className: "btn-ghost small", onClick: () => setShowPinModal("remove") }, "Remove")))))))),
-        React.createElement("main", { className: "main" },
-            allDueCards.length > 0 && (React.createElement("button", { className: "overdue-banner", onClick: () => {
-                    setCrossTagSession({ tagName: "Overdue across all subjects", cards: allDueCards });
-                    setShowReview(true);
-                } },
-                React.createElement("span", null,
-                    "\u23F0 ",
-                    allDueCards.length,
-                    " card",
-                    allDueCards.length === 1 ? "" : "s",
-                    " overdue across your subjects"),
-                React.createElement("span", { className: "overdue-banner-cta" }, "Review now \u2192"))),
-            !selectedSubject ? (React.createElement(Dashboard, { subjects: data.subjects, notes: data.notes, weakSpots: weakSpots, tagName: tagName, onNavigate: (subjectId, tagId) => {
-                    setSelectedSubjectId(subjectId);
-                    setSelectedTagIds([tagId]);
-                    setTab("study");
-                }, onNewSubject: () => setShowNewSubject(true), globalTagStats: globalTagStats, onStudyTag: (tagId, tagName2, mode) => {
-                    const cards = cardsByTagAcrossSubjects(tagId);
-                    if (cards.length === 0)
-                        return;
-                    setCrossTagSession({ tagName: tagName2, cards });
-                    if (mode === "match")
-                        setShowMatch(true);
-                    else
-                        setShowReview(true);
-                }, dueForecast: dueForecast, onOpenNote: navigateToNote })) : (React.createElement(React.Fragment, null,
-                React.createElement("header", { className: "main-header" },
-                    React.createElement("div", null,
-                        React.createElement("div", { className: "eyebrow", style: { color: selectedSubject.color } }, "Subject"),
-                        React.createElement("h1", null, selectedSubject.name)),
-                    React.createElement("div", { className: "header-actions" },
-                        tab === "notes" ? (React.createElement(ExportMenu, { label: "Export subject", onCopy: null, onDownload: () => exportSubjectNotes("md"), onPdf: () => exportSubjectNotes("pdf"), onShare: null })) : (React.createElement(ExportMenu, { label: "Export cards", onCopy: null, onDownload: () => exportSubjectCards("md"), onPdf: () => exportSubjectCards("pdf"), onShare: () => exportSubjectCards("share") })),
-                        React.createElement("button", { className: "btn-ghost small", onClick: () => exportSubjectAsDataFile(selectedSubject.id), title: "Save this subject (and its notes/cards) as a file you can bring back in later \u2014 frees up space without losing anything" }, "\uD83D\uDCBE Archive to file"),
-                        React.createElement("button", { className: "btn-ghost small danger", onClick: () => deleteSubject(selectedSubject.id) }, "Delete subject"))),
-                React.createElement("div", { className: "section-divider", "aria-hidden": "true" }),
-                React.createElement("div", { className: "tab-bar" },
-                    React.createElement("button", { className: "tab-btn" + (tab === "notes" ? " active" : ""), onClick: () => setTab("notes") }, "Notes"),
-                    React.createElement("button", { className: "tab-btn" + (tab === "study" ? " active" : ""), onClick: () => setTab("study") },
-                        "Study ",
-                        dueCards.length > 0 && React.createElement("span", { className: "tab-badge" }, dueCards.length))),
-                tab === "notes" ? (React.createElement(React.Fragment, null,
-                    React.createElement(QuickAddNote, { onAdd: quickAddNote, onViewImage: setLightboxImage, onImageError: () => showToast("Couldn't load that image — try saving it to your device first, then use + Add image.") }),
-                    React.createElement("div", { className: "filters" },
-                        React.createElement("input", { className: "search", placeholder: "Search this subject\u2026", value: query, onChange: (e) => setQuery(e.target.value) }),
-                        subjectTags.length > 0 && (React.createElement("div", { className: "tag-filters" }, subjectTags.map((t) => (React.createElement("button", { key: t.id, className: "tag-chip" + (selectedTagIds.includes(t.id) ? " active" : ""), onClick: () => toggleTagFilter(t.id) },
-                            "#",
-                            t.name)))))),
-                    React.createElement("div", { className: "bulk-select-row" },
-                        React.createElement("button", { className: "btn-ghost small" + (noteSelectMode ? " active-toggle" : ""), onClick: () => {
-                                setNoteSelectMode((m) => !m);
-                                setSelectedNoteIdsForBulk(new Set());
-                            } }, noteSelectMode ? "Cancel" : "Select"),
-                        noteSelectMode && selectedNoteIdsForBulk.size > 0 && (React.createElement(React.Fragment, null,
-                            React.createElement("span", { className: "bulk-select-count" },
-                                selectedNoteIdsForBulk.size,
-                                " selected"),
-                            React.createElement("button", { className: "btn-primary small", onClick: () => setShowBulkTag(true) }, "+ Add tag"),
-                            React.createElement("button", { className: "btn-ghost small", onClick: () => setShowBulkMove(true) }, "Move to subject")))),
-                    visibleNotes.length === 0 ? (React.createElement("div", { className: "empty-state small" },
-                        React.createElement("p", null, data.notes.some((n) => n.subjectId === selectedSubject.id)
-                            ? "No notes match this filter."
-                            : "No notes in this subject yet. Add one above."))) : (React.createElement("div", { className: "note-grid" }, visibleNotes.map((n) => (React.createElement("article", { key: n.id, className: "note-card" + (noteSelectMode && selectedNoteIdsForBulk.has(n.id) ? " select-active" : ""), style: { background: n.color || "var(--surface)", "--note-ink": n.color ? "#241C3D" : undefined, "--note-muted": n.color ? "rgba(36,28,61,0.65)" : undefined } },
-                        React.createElement("div", { className: "note-card-top", onClick: () => (noteSelectMode ? toggleNoteSelection(n.id) : setEditingNote(n)) },
-                            noteSelectMode && (React.createElement("input", { type: "checkbox", className: "note-select-checkbox", checked: selectedNoteIdsForBulk.has(n.id), onChange: () => toggleNoteSelection(n.id), onClick: (e) => e.stopPropagation() })),
-                            React.createElement("span", { className: "note-card-subject-dot", style: { background: selectedSubject.color } }),
-                            React.createElement("h3", null, n.title),
-                            React.createElement("div", { className: "note-card-preview", dangerouslySetInnerHTML: { __html: n.bodyHTML || "" } }),
-                            n.images && n.images.length > 0 && (React.createElement("div", { className: "note-thumb-strip" },
-                                n.images.slice(0, 3).map((img) => (React.createElement("img", { key: img.id, src: img.dataUrl, alt: "", className: "note-thumb", onClick: (e) => {
-                                        e.stopPropagation();
-                                        setLightboxImage(img.dataUrl);
-                                    } }))),
-                                n.images.length > 3 && React.createElement("span", { className: "note-thumb-more" },
-                                    "+",
-                                    n.images.length - 3)))),
-                        n.tagIds.length > 0 && (React.createElement("div", { className: "note-card-tags" }, n.tagIds.map((tid) => (React.createElement("span", { key: tid, className: "tag-pill" },
-                            "#",
-                            tagName(tid)))))),
-                        React.createElement("div", { className: "note-card-footer" },
-                            React.createElement("span", { className: "note-date" },
-                                formatDate(n.updatedAt),
-                                ((n.linkedNoteIds || []).length > 0 || data.notes.some((o) => o.id !== n.id && (o.linkedNoteIds || []).includes(n.id))) && (React.createElement("span", { className: "note-link-badge", title: "This note has links" }, "\uD83D\uDD17"))),
-                            React.createElement("div", { className: "note-card-actions" },
-                                React.createElement(ExportMenu, { compact: true, onCopy: () => exportNote(n, "copy"), onDownload: () => exportNote(n, "download"), onPdf: () => exportNote(n, "pdf"), onShare: () => exportNote(n, "share") }),
-                                React.createElement("button", { title: "Edit", onClick: () => setEditingNote(n) }, "\u270E"),
-                                React.createElement("button", { title: "Delete", onClick: () => deleteNote(n.id) }, "\u2715")))))))))) : (React.createElement(React.Fragment, null,
-                    subjectTags.length > 0 && (React.createElement("div", { className: "tag-filters study-tag-filters" }, subjectTags.map((t) => (React.createElement("button", { key: t.id, className: "tag-chip" + (selectedTagIds.includes(t.id) ? " active" : ""), onClick: () => toggleTagFilter(t.id) },
-                        "#",
-                        t.name))))),
-                    React.createElement(StudyPanel, { subject: selectedSubject, notes: data.notes.filter((n) => n.subjectId === selectedSubject.id), cards: subjectCards, dueCount: dueCards.length, missedCount: missedCards.length, points: totalPoints, onImport: () => setShowImportCards(true), onReview: () => setShowReview(true), onMatch: () => setShowMatch(true), onOcclusion: () => {
-                            setOcclusionSeedImage(null);
-                            setOcclusionSourceNoteId(null);
-                            setShowOcclusion(true);
-                        }, onToggleStar: toggleStar, onDelete: deleteCard, onEdit: (c) => setEditingCard(c), scope: studyScope, onScopeChange: setStudyScope, notesWithCards: notesWithCards, noteFilter: selectedNoteFilter, onNoteFilterChange: setSelectedNoteFilter, selectedCardIds: manualSelectedCardIds, onToggleCardSelect: toggleCardSelection, onClearSelection: clearCardSelection })))))),
-        editingNote !== null && (React.createElement("div", { className: "note-editor-fullscreen-wrap" },
-            React.createElement(NoteEditor, { key: editingNote.id || "new", note: editingNote, allTags: data.tags, existingTagIds: editingNote.tagIds || [], tagName: tagName, subjectOptions: flatSubjectOptions, currentSubjectId: editingNote.subjectId || selectedSubjectId, allNotes: data.notes, subjects: data.subjects, onCancel: () => {
-                    setEditingNote(null);
-                    setSplitPane(null);
-                }, onSave: async (payload) => {
-                    await saveNote(editingNote, payload);
-                    setEditingNote(null);
-                    setSplitPane(null);
-                }, onCreateCard: (noteId, front, back) => createCardFromHighlight(noteId, front, back), onCreateCards: (noteId, subjectIdForCards, cardPairs) => createCardsFromAI(noteId, subjectIdForCards, cardPairs), openRouterKey: openRouterKey, onOccludeImage: (dataUrl, noteId) => {
-                    setOcclusionSeedImage(dataUrl);
-                    setOcclusionSourceNoteId(noteId);
-                    setEditingNote(null);
-                    setSplitPane(null);
-                    setShowOcclusion(true);
-                }, onViewImage: setLightboxImage, onNavigateToNote: navigateToNote, onSplitWithNote: openSplitNote, onSplitWithCards: openSplitCards, isSplitPane: false, onImageError: () => showToast("Couldn't load that image — try saving it to your device first, then use + Add image.") }),
-            splitPane && splitPane.type === "note" && (React.createElement(NoteEditor, { key: "split-" + splitPane.note.id, note: splitPane.note, allTags: data.tags, existingTagIds: splitPane.note.tagIds || [], tagName: tagName, subjectOptions: flatSubjectOptions, currentSubjectId: splitPane.note.subjectId, allNotes: data.notes, subjects: data.subjects, onCancel: () => setSplitPane(null), onSave: async (payload) => {
-                    await saveNote(splitPane.note, payload);
-                    setSplitPane(null);
-                }, onCreateCard: (noteId, front, back) => createCardFromHighlight(noteId, front, back), onCreateCards: (noteId, subjectIdForCards, cardPairs) => createCardsFromAI(noteId, subjectIdForCards, cardPairs), openRouterKey: openRouterKey, onOccludeImage: (dataUrl, noteId) => {
-                    setOcclusionSeedImage(dataUrl);
-                    setOcclusionSourceNoteId(noteId);
-                    setEditingNote(null);
-                    setSplitPane(null);
-                    setShowOcclusion(true);
-                }, onViewImage: setLightboxImage, onNavigateToNote: navigateToNote, isSplitPane: true, onImageError: () => showToast("Couldn't load that image — try saving it to your device first, then use + Add image.") })),
-            splitPane && splitPane.type === "cards" && (React.createElement(SplitCardsPanel, { cards: splitPaneCards, scope: splitPane.scope, onScopeChange: (scope) => setSplitPane((p) => ({ ...p, scope })), noteTitle: (data.notes.find((n) => n.id === splitPane.noteId) || {}).title || "", subjectTitle: (data.subjects.find((s) => s.id === splitPane.subjectId) || {}).name || "", onClose: () => setSplitPane(null), onEditCard: (c) => setEditingCard(c), onToggleStar: toggleStar, onDeleteCard: deleteCard, onStudy: () => {
-                    if (splitPaneCards.length === 0)
-                        return;
-                    setCrossTagSession({
-                        tagName: splitPane.scope === "subject" ? (data.subjects.find((s) => s.id === splitPane.subjectId) || {}).name : "this note",
-                        cards: splitPaneCards,
-                    });
-                    setShowReview(true);
-                } })))),
-        editingCard !== null && (React.createElement(CardEditor, { card: editingCard, onCancel: () => setEditingCard(null), onSave: updateCard })),
-        confirmDialog && (React.createElement(ConfirmDialog, { message: confirmDialog.message, confirmLabel: confirmDialog.confirmLabel, onCancel: () => setConfirmDialog(null), onConfirm: () => {
-                confirmDialog.onConfirm();
-                setConfirmDialog(null);
-            } })),
-        pdfImportFile && (React.createElement(PdfImportModal, { filename: pdfImportFile.name, busy: pdfImportBusy, error: pdfImportError, onCancel: () => { setPdfImportFile(null); setPdfImportError(""); }, onConfirm: confirmPdfImport })),
-        showAddArticle && (React.createElement(AddArticleModal, { busy: articleImportBusy, error: articleImportError, onCancel: () => { setShowAddArticle(false); setArticleImportError(""); }, onConfirm: handleAddArticleConfirm })),
-        showAskLibrary && (React.createElement(AskLibraryModal, { subjects: data.subjects, scope: libraryAskScope, onScopeChange: setLibraryAskScope, question: libraryAskQuestion, onQuestionChange: setLibraryAskQuestion, answer: libraryAskAnswer, coverage: libraryAskCoverage, busy: libraryAskBusy, error: libraryAskError, onAsk: handleAskLibrary, onCancel: () => {
-                setShowAskLibrary(false);
-                setLibraryAskQuestion("");
-                setLibraryAskAnswer("");
-                setLibraryAskError("");
-                setLibraryAskCoverage(null);
-            } })),
-        showPinModal && (React.createElement(PinModal, { mode: showPinModal, onVerify: verifyPin, onSetNew: savePin, onCancel: () => setShowPinModal(null) })),
-        showBulkTag && (React.createElement(BulkTagModal, { count: selectedNoteIdsForBulk.size, allTags: data.tags, onCancel: () => setShowBulkTag(false), onApply: applyBulkTag })),
-        showBulkMove && selectedSubject && (React.createElement(BulkMoveModal, { count: selectedNoteIdsForBulk.size, subjectOptions: flatSubjectOptions.filter((s) => s.id !== selectedSubject.id), onCancel: () => setShowBulkMove(false), onApply: applyBulkMove })),
-        lightboxImage && React.createElement(ImageLightbox, { src: lightboxImage, onClose: () => setLightboxImage(null) }),
-        showImportCards && selectedSubject && (React.createElement(ImportCardsModal, { onCancel: () => setShowImportCards(false), onConfirm: async (cards) => {
-                await addCardsToDeck(cards);
-                setShowImportCards(false);
-            } })),
-        showOcclusion && selectedSubject && (React.createElement(OcclusionCreator, { initialImage: occlusionSeedImage, initialNoteId: occlusionSourceNoteId, notes: data.notes.filter((n) => n.subjectId === selectedSubject.id), onCancel: () => {
-                setShowOcclusion(false);
-                setOcclusionSeedImage(null);
-                setOcclusionSourceNoteId(null);
-            }, onCreate: addOcclusionCards })),
-        showReview && (selectedSubject || crossTagSession) && (React.createElement(ReviewSession, { cards: crossTagSession ? crossTagSession.cards : studyCards, onAnswer: answerCard, onToggleStar: toggleStar, onClose: () => {
-                setShowReview(false);
-                setCrossTagSession(null);
-            } })),
-        showMatch && (selectedSubject || crossTagSession) && (React.createElement(MatchGame, { cards: crossTagSession ? crossTagSession.cards : studyCards, onClose: () => {
-                setShowMatch(false);
-                setCrossTagSession(null);
-            } })),
-        toast && React.createElement("div", { className: "toast" }, toast)));
+  }, "Subject"), /*#__PURE__*/React.createElement("h1", null, selectedSubject.name)), /*#__PURE__*/React.createElement("div", {
+    className: "header-actions"
+  }, tab === "notes" ? /*#__PURE__*/React.createElement(ExportMenu, {
+    label: "Export subject",
+    onCopy: null,
+    onDownload: () => exportSubjectNotes("md"),
+    onPdf: () => exportSubjectNotes("pdf"),
+    onShare: null
+  }) : /*#__PURE__*/React.createElement(ExportMenu, {
+    label: "Export cards",
+    onCopy: null,
+    onDownload: () => exportSubjectCards("md"),
+    onPdf: () => exportSubjectCards("pdf"),
+    onShare: () => exportSubjectCards("share")
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small",
+    onClick: () => exportSubjectAsDataFile(selectedSubject.id),
+    title: "Save this subject (and its notes/cards) as a file you can bring back in later \u2014 frees up space without losing anything"
+  }, "\uD83D\uDCBE Archive to file"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small danger",
+    onClick: () => deleteSubject(selectedSubject.id)
+  }, "Delete subject"))), /*#__PURE__*/React.createElement("div", {
+    className: "section-divider",
+    "aria-hidden": "true"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "tab-bar"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "tab-btn" + (tab === "notes" ? " active" : ""),
+    onClick: () => setTab("notes")
+  }, "Notes"), /*#__PURE__*/React.createElement("button", {
+    className: "tab-btn" + (tab === "study" ? " active" : ""),
+    onClick: () => setTab("study")
+  }, "Study ", dueCards.length > 0 && /*#__PURE__*/React.createElement("span", {
+    className: "tab-badge"
+  }, dueCards.length))), tab === "notes" ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(QuickAddNote, {
+    onAdd: quickAddNote,
+    onViewImage: setLightboxImage,
+    onImageError: () => showToast("Couldn't load that image — try saving it to your device first, then use + Add image."),
+    onSaveError: showToast
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "filters"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "search",
+    placeholder: "Search this subject\u2026",
+    value: query,
+    onChange: e => setQuery(e.target.value)
+  }), subjectTags.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "tag-filters"
+  }, subjectTags.map(t => /*#__PURE__*/React.createElement("button", {
+    key: t.id,
+    className: "tag-chip" + (selectedTagIds.includes(t.id) ? " active" : ""),
+    onClick: () => toggleTagFilter(t.id)
+  }, "#", t.name)))), /*#__PURE__*/React.createElement("div", {
+    className: "bulk-select-row"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small" + (noteSelectMode ? " active-toggle" : ""),
+    onClick: () => {
+      setNoteSelectMode(m => !m);
+      setSelectedNoteIdsForBulk(new Set());
+    }
+  }, noteSelectMode ? "Cancel" : "Select"), noteSelectMode && selectedNoteIdsForBulk.size > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
+    className: "bulk-select-count"
+  }, selectedNoteIdsForBulk.size, " selected"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary small",
+    onClick: () => setShowBulkTag(true)
+  }, "+ Add tag"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small",
+    onClick: () => setShowBulkMove(true)
+  }, "Move to subject"))), visibleNotes.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "empty-state small"
+  }, /*#__PURE__*/React.createElement("p", null, data.notes.some(n => n.subjectId === selectedSubject.id) ? "No notes match this filter." : "No notes in this subject yet. Add one above.")) : /*#__PURE__*/React.createElement("div", {
+    className: "note-grid"
+  }, visibleNotes.map(n => /*#__PURE__*/React.createElement("article", {
+    key: n.id,
+    className: "note-card" + (noteSelectMode && selectedNoteIdsForBulk.has(n.id) ? " select-active" : ""),
+    style: {
+      background: n.color || "var(--surface)",
+      "--note-ink": n.color ? "#241C3D" : undefined,
+      "--note-muted": n.color ? "rgba(36,28,61,0.65)" : undefined
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "note-card-top",
+    onClick: () => noteSelectMode ? toggleNoteSelection(n.id) : setEditingNote(n)
+  }, noteSelectMode && /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    className: "note-select-checkbox",
+    checked: selectedNoteIdsForBulk.has(n.id),
+    onChange: () => toggleNoteSelection(n.id),
+    onClick: e => e.stopPropagation()
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "note-card-subject-dot",
+    style: {
+      background: selectedSubject.color
+    }
+  }), /*#__PURE__*/React.createElement("h3", null, n.title), /*#__PURE__*/React.createElement("div", {
+    className: "note-card-preview",
+    dangerouslySetInnerHTML: {
+      __html: n.bodyHTML || ""
+    }
+  }), n.images && n.images.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "note-thumb-strip"
+  }, n.images.slice(0, 3).map(img => /*#__PURE__*/React.createElement("img", {
+    key: img.id,
+    src: img.dataUrl,
+    alt: "",
+    className: "note-thumb",
+    onClick: e => {
+      e.stopPropagation();
+      setLightboxImage(img.dataUrl);
+    }
+  })), n.images.length > 3 && /*#__PURE__*/React.createElement("span", {
+    className: "note-thumb-more"
+  }, "+", n.images.length - 3))), n.tagIds.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "note-card-tags"
+  }, n.tagIds.map(tid => /*#__PURE__*/React.createElement("span", {
+    key: tid,
+    className: "tag-pill"
+  }, "#", tagName(tid)))), /*#__PURE__*/React.createElement("div", {
+    className: "note-card-footer"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "note-date"
+  }, formatDate(n.updatedAt), ((n.linkedNoteIds || []).length > 0 || data.notes.some(o => o.id !== n.id && (o.linkedNoteIds || []).includes(n.id))) && /*#__PURE__*/React.createElement("span", {
+    className: "note-link-badge",
+    title: "This note has links"
+  }, "\uD83D\uDD17")), /*#__PURE__*/React.createElement("div", {
+    className: "note-card-actions"
+  }, /*#__PURE__*/React.createElement(ExportMenu, {
+    compact: true,
+    onCopy: () => exportNote(n, "copy"),
+    onDownload: () => exportNote(n, "download"),
+    onPdf: () => exportNote(n, "pdf"),
+    onShare: () => exportNote(n, "share")
+  }), /*#__PURE__*/React.createElement("button", {
+    title: "Edit",
+    onClick: () => setEditingNote(n)
+  }, "\u270E"), /*#__PURE__*/React.createElement("button", {
+    title: "Delete",
+    onClick: () => deleteNote(n.id)
+  }, "\u2715"))))))) : /*#__PURE__*/React.createElement(React.Fragment, null, subjectTags.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "tag-filters study-tag-filters"
+  }, subjectTags.map(t => /*#__PURE__*/React.createElement("button", {
+    key: t.id,
+    className: "tag-chip" + (selectedTagIds.includes(t.id) ? " active" : ""),
+    onClick: () => toggleTagFilter(t.id)
+  }, "#", t.name))), /*#__PURE__*/React.createElement(StudyPanel, {
+    subject: selectedSubject,
+    notes: data.notes.filter(n => n.subjectId === selectedSubject.id),
+    cards: subjectCards,
+    dueCount: dueCards.length,
+    missedCount: missedCards.length,
+    points: totalPoints,
+    onImport: () => setShowImportCards(true),
+    onReview: () => setShowReview(true),
+    onMatch: () => setShowMatch(true),
+    onOcclusion: () => {
+      setOcclusionSeedImage(null);
+      setOcclusionSourceNoteId(null);
+      setShowOcclusion(true);
+    },
+    onToggleStar: toggleStar,
+    onDelete: deleteCard,
+    onEdit: c => setEditingCard(c),
+    scope: studyScope,
+    onScopeChange: setStudyScope,
+    notesWithCards: notesWithCards,
+    noteFilter: selectedNoteFilter,
+    onNoteFilterChange: setSelectedNoteFilter,
+    selectedCardIds: manualSelectedCardIds,
+    onToggleCardSelect: toggleCardSelection,
+    onClearSelection: clearCardSelection
+  })))), editingNote !== null && /*#__PURE__*/React.createElement("div", {
+    className: "note-editor-fullscreen-wrap"
+  }, /*#__PURE__*/React.createElement(NoteEditor, {
+    key: editingNote.id || "new",
+    note: editingNote,
+    allTags: data.tags,
+    existingTagIds: editingNote.tagIds || [],
+    tagName: tagName,
+    subjectOptions: flatSubjectOptions,
+    currentSubjectId: editingNote.subjectId || selectedSubjectId,
+    allNotes: data.notes,
+    subjects: data.subjects,
+    onCancel: () => {
+      setEditingNote(null);
+      setSplitPane(null);
+    },
+    onSave: async payload => {
+      await saveNote(editingNote, payload);
+      setEditingNote(null);
+      setSplitPane(null);
+    },
+    onCreateCard: (noteId, front, back) => createCardFromHighlight(noteId, front, back),
+    onOccludeImage: (dataUrl, noteId) => {
+      setOcclusionSeedImage(dataUrl);
+      setOcclusionSourceNoteId(noteId);
+      setEditingNote(null);
+      setSplitPane(null);
+      setShowOcclusion(true);
+    },
+    onViewImage: setLightboxImage,
+    onNavigateToNote: navigateToNote,
+    onSplitWithNote: openSplitNote,
+    onSplitWithCards: openSplitCards,
+    isSplitPane: false,
+    onImageError: () => showToast("Couldn't load that image — try saving it to your device first, then use + Add image.")
+  }), splitPane && splitPane.type === "note" && /*#__PURE__*/React.createElement(NoteEditor, {
+    key: "split-" + splitPane.note.id,
+    note: splitPane.note,
+    allTags: data.tags,
+    existingTagIds: splitPane.note.tagIds || [],
+    tagName: tagName,
+    subjectOptions: flatSubjectOptions,
+    currentSubjectId: splitPane.note.subjectId,
+    allNotes: data.notes,
+    subjects: data.subjects,
+    onCancel: () => setSplitPane(null),
+    onSave: async payload => {
+      await saveNote(splitPane.note, payload);
+      setSplitPane(null);
+    },
+    onCreateCard: (noteId, front, back) => createCardFromHighlight(noteId, front, back),
+    onOccludeImage: (dataUrl, noteId) => {
+      setOcclusionSeedImage(dataUrl);
+      setOcclusionSourceNoteId(noteId);
+      setEditingNote(null);
+      setSplitPane(null);
+      setShowOcclusion(true);
+    },
+    onViewImage: setLightboxImage,
+    onNavigateToNote: navigateToNote,
+    isSplitPane: true,
+    onImageError: () => showToast("Couldn't load that image — try saving it to your device first, then use + Add image.")
+  }), splitPane && splitPane.type === "cards" && /*#__PURE__*/React.createElement(SplitCardsPanel, {
+    cards: splitPaneCards,
+    scope: splitPane.scope,
+    onScopeChange: scope => setSplitPane(p => ({
+      ...p,
+      scope
+    })),
+    noteTitle: (data.notes.find(n => n.id === splitPane.noteId) || {}).title || "",
+    subjectTitle: (data.subjects.find(s => s.id === splitPane.subjectId) || {}).name || "",
+    onClose: () => setSplitPane(null),
+    onEditCard: c => setEditingCard(c),
+    onToggleStar: toggleStar,
+    onDeleteCard: deleteCard,
+    onStudy: () => {
+      if (splitPaneCards.length === 0) return;
+      setCrossTagSession({
+        tagName: splitPane.scope === "subject" ? (data.subjects.find(s => s.id === splitPane.subjectId) || {}).name : "this note",
+        cards: splitPaneCards
+      });
+      setShowReview(true);
+    }
+  })), editingCard !== null && /*#__PURE__*/React.createElement(CardEditor, {
+    card: editingCard,
+    onCancel: () => setEditingCard(null),
+    onSave: updateCard
+  }), confirmDialog && /*#__PURE__*/React.createElement(ConfirmDialog, {
+    message: confirmDialog.message,
+    confirmLabel: confirmDialog.confirmLabel,
+    onCancel: () => setConfirmDialog(null),
+    onConfirm: () => {
+      confirmDialog.onConfirm();
+      setConfirmDialog(null);
+    }
+  }), pdfImportFile && /*#__PURE__*/React.createElement(PdfImportModal, {
+    filename: pdfImportFile.name,
+    busy: pdfImportBusy,
+    error: pdfImportError,
+    onCancel: () => {
+      setPdfImportFile(null);
+      setPdfImportError("");
+    },
+    onConfirm: confirmPdfImport
+  }), showAddArticle && /*#__PURE__*/React.createElement(AddArticleModal, {
+    busy: articleImportBusy,
+    error: articleImportError,
+    onCancel: () => {
+      setShowAddArticle(false);
+      setArticleImportError("");
+    },
+    onConfirm: handleAddArticleConfirm
+  }), showPinModal && /*#__PURE__*/React.createElement(PinModal, {
+    mode: showPinModal,
+    onVerify: verifyPin,
+    onSetNew: savePin,
+    onCancel: () => setShowPinModal(null)
+  }), showBulkTag && /*#__PURE__*/React.createElement(BulkTagModal, {
+    count: selectedNoteIdsForBulk.size,
+    allTags: data.tags,
+    onCancel: () => setShowBulkTag(false),
+    onApply: applyBulkTag
+  }), showBulkMove && selectedSubject && /*#__PURE__*/React.createElement(BulkMoveModal, {
+    count: selectedNoteIdsForBulk.size,
+    subjectOptions: flatSubjectOptions.filter(s => s.id !== selectedSubject.id),
+    onCancel: () => setShowBulkMove(false),
+    onApply: applyBulkMove
+  }), lightboxImage && /*#__PURE__*/React.createElement(ImageLightbox, {
+    src: lightboxImage,
+    onClose: () => setLightboxImage(null)
+  }), showImportCards && selectedSubject && /*#__PURE__*/React.createElement(ImportCardsModal, {
+    onCancel: () => setShowImportCards(false),
+    onConfirm: async cards => {
+      await addCardsToDeck(cards);
+      setShowImportCards(false);
+    }
+  }), showOcclusion && selectedSubject && /*#__PURE__*/React.createElement(OcclusionCreator, {
+    initialImage: occlusionSeedImage,
+    initialNoteId: occlusionSourceNoteId,
+    notes: data.notes.filter(n => n.subjectId === selectedSubject.id),
+    onCancel: () => {
+      setShowOcclusion(false);
+      setOcclusionSeedImage(null);
+      setOcclusionSourceNoteId(null);
+    },
+    onCreate: addOcclusionCards
+  }), showReview && (selectedSubject || crossTagSession) && /*#__PURE__*/React.createElement(ReviewSession, {
+    cards: crossTagSession ? crossTagSession.cards : studyCards,
+    onAnswer: answerCard,
+    onToggleStar: toggleStar,
+    onClose: () => {
+      setShowReview(false);
+      setCrossTagSession(null);
+    }
+  }), showMatch && (selectedSubject || crossTagSession) && /*#__PURE__*/React.createElement(MatchGame, {
+    cards: crossTagSession ? crossTagSession.cards : studyCards,
+    onClose: () => {
+      setShowMatch(false);
+      setCrossTagSession(null);
+    }
+  }), toast && /*#__PURE__*/React.createElement("div", {
+    className: "toast"
+  }, toast));
 }
+
 // ---------- Dashboard ----------
-function Dashboard({ subjects, notes, weakSpots, tagName, onNavigate, onNewSubject, globalTagStats, onStudyTag, dueForecast, onOpenNote }) {
-    const [homeSearch, setHomeSearch] = useState("");
-    const subjectName = (id) => subjects.find((s) => s.id === id)?.name || "—";
-    const subjectColor = (id) => subjects.find((s) => s.id === id)?.color || "#6C5CE7";
-    const subjectPath = (id) => {
-        const s = subjects.find((s) => s.id === id);
-        if (!s)
-            return "—";
-        if (!s.parentId)
-            return s.name;
-        const parent = subjects.find((p) => p.id === s.parentId);
-        return parent ? `${parent.name} › ${s.name}` : s.name;
-    };
-    const forecastMax = dueForecast ? Math.max(1, ...dueForecast.map((d) => d.count)) : 1;
-    const searchResults = useMemo(() => {
-        const q = homeSearch.trim().toLowerCase();
-        if (!q || !notes)
-            return [];
-        return notes
-            .map((n) => {
-            const bodyText = htmlToPlainText(n.bodyHTML || "");
-            const titleHit = n.title.toLowerCase().includes(q);
-            const bodyHit = bodyText.toLowerCase().includes(q);
-            const tagHit = (n.tagIds || []).some((tid) => tagName(tid).toLowerCase().includes(q));
-            if (!titleHit && !bodyHit && !tagHit)
-                return null;
-            return { note: n, snippet: bodyHit ? extractSnippet(bodyText, q) : "" };
-        })
-            .filter(Boolean)
-            .slice(0, 30);
-    }, [homeSearch, notes, tagName]);
-    return (React.createElement("div", { className: "dashboard" },
-        React.createElement("div", { className: "eyebrow", style: { color: "#6C5CE7" } }, "Home"),
-        React.createElement("h1", null, "Your chart at a glance"),
-        React.createElement("input", { className: "home-search-input", placeholder: "Search notes, tags, anything\u2026", value: homeSearch, onChange: (e) => setHomeSearch(e.target.value) }),
-        homeSearch.trim() ? (React.createElement("div", { className: "home-search-results" }, searchResults.length === 0 ? (React.createElement("p", { className: "study-hint" },
-            "No matches for \"",
-            homeSearch.trim(),
-            "\".")) : (searchResults.map(({ note, snippet }) => (React.createElement("button", { key: note.id, className: "home-search-result", onClick: () => onOpenNote(note.id) },
-            React.createElement("div", { className: "home-search-result-top" },
-                React.createElement("span", { className: "home-search-result-title" }, note.title),
-                React.createElement("span", { className: "home-search-result-location" }, subjectPath(note.subjectId))),
-            snippet && React.createElement("p", { className: "home-search-result-snippet" }, snippet),
-            note.tagIds && note.tagIds.length > 0 && (React.createElement("div", { className: "home-search-result-tags" }, note.tagIds.map((tid) => (React.createElement("span", { key: tid, className: "tag-pill" },
-                "#",
-                tagName(tid)))))))))))) : subjects.length === 0 ? (React.createElement("div", { className: "empty-state" },
-            React.createElement("div", { className: "empty-mark" }, "\u2726"),
-            React.createElement("h2", null, "Nothing here yet"),
-            React.createElement("p", null, "Create a subject on the left, then start adding notes."),
-            React.createElement("button", { className: "btn-primary", onClick: onNewSubject, style: { marginTop: 12 } }, "+ New subject"))) : (React.createElement(React.Fragment, null,
-            dueForecast && dueForecast.some((d) => d.count > 0) && (React.createElement("div", { className: "forecast-section" },
-                React.createElement("h2", { className: "dashboard-subheading" }, "Coming up"),
-                React.createElement("div", { className: "forecast-row" }, dueForecast.map((d) => (React.createElement("div", { key: d.label, className: "forecast-day" },
-                    React.createElement("div", { className: "forecast-bar-track" },
-                        React.createElement("div", { className: "forecast-bar" + (d.count === 0 ? " zero" : ""), style: { height: `${Math.max(4, (d.count / forecastMax) * 100)}%` } })),
-                    React.createElement("span", { className: "forecast-count" }, d.count),
-                    React.createElement("span", { className: "forecast-label" }, d.label))))))),
-            globalTagStats.length > 0 && (React.createElement("div", { className: "tag-study-section" },
-                React.createElement("h2", { className: "dashboard-subheading" }, "Study by tag"),
-                React.createElement("p", { className: "study-hint" }, "Every card with this tag, no matter which subject it's filed under."),
-                React.createElement("div", { className: "tag-study-list" }, globalTagStats.map((t) => (React.createElement("div", { key: t.id, className: "tag-study-row" },
-                    React.createElement("span", { className: "tag-pill" },
-                        "#",
-                        t.name),
-                    React.createElement("span", { className: "tag-study-count" },
-                        t.count,
-                        " card",
-                        t.count === 1 ? "" : "s"),
-                    React.createElement("div", { className: "tag-study-actions" },
-                        React.createElement("button", { className: "btn-ghost small", onClick: () => onStudyTag(t.id, t.name, "review") }, "Cards"),
-                        React.createElement("button", { className: "btn-ghost small", disabled: t.count < 4, onClick: () => onStudyTag(t.id, t.name, "match") }, "Match")))))))),
-            weakSpots.length === 0 ? (React.createElement("p", { className: "study-hint" }, "Once you've reviewed some cards, this will show which tags you're weakest on so you know what to cram.")) : (React.createElement(React.Fragment, null,
-                React.createElement("h2", { className: "dashboard-subheading" }, "Weakest tags"),
-                React.createElement("p", { className: "study-hint" }, "Based on your review accuracy \u2014 lowest first."),
-                React.createElement("table", { className: "weak-table" },
-                    React.createElement("thead", null,
-                        React.createElement("tr", null,
-                            React.createElement("th", null, "Subject"),
-                            React.createElement("th", null, "Tag"),
-                            React.createElement("th", null, "Accuracy"),
-                            React.createElement("th", null, "Attempts"),
-                            React.createElement("th", null))),
-                    React.createElement("tbody", null, weakSpots.map((w) => (React.createElement("tr", { key: w.subjectId + w.tagId },
-                        React.createElement("td", null,
-                            React.createElement("span", { className: "weak-subject-dot", style: { background: subjectColor(w.subjectId) } }),
-                            subjectName(w.subjectId)),
-                        React.createElement("td", null,
-                            "#",
-                            tagName(w.tagId)),
-                        React.createElement("td", { className: w.accuracy < 0.6 ? "weak-accuracy-low" : "" },
-                            Math.round(w.accuracy * 100),
-                            "%"),
-                        React.createElement("td", null, w.attempts),
-                        React.createElement("td", null,
-                            React.createElement("button", { className: "btn-ghost small", onClick: () => onNavigate(w.subjectId, w.tagId) }, "Review")))))))))))));
+
+function Dashboard({
+  subjects,
+  notes,
+  weakSpots,
+  tagName,
+  onNavigate,
+  onNewSubject,
+  globalTagStats,
+  onStudyTag,
+  dueForecast,
+  onOpenNote
+}) {
+  const [homeSearch, setHomeSearch] = useState("");
+  const subjectName = id => subjects.find(s => s.id === id)?.name || "—";
+  const subjectColor = id => subjects.find(s => s.id === id)?.color || "#6C5CE7";
+  const subjectPath = id => {
+    const s = subjects.find(s => s.id === id);
+    if (!s) return "—";
+    if (!s.parentId) return s.name;
+    const parent = subjects.find(p => p.id === s.parentId);
+    return parent ? `${parent.name} › ${s.name}` : s.name;
+  };
+  const forecastMax = dueForecast ? Math.max(1, ...dueForecast.map(d => d.count)) : 1;
+  const searchResults = useMemo(() => {
+    const q = homeSearch.trim().toLowerCase();
+    if (!q || !notes) return [];
+    return notes.map(n => {
+      const bodyText = htmlToPlainText(n.bodyHTML || "");
+      const titleHit = n.title.toLowerCase().includes(q);
+      const bodyHit = bodyText.toLowerCase().includes(q);
+      const tagHit = (n.tagIds || []).some(tid => tagName(tid).toLowerCase().includes(q));
+      if (!titleHit && !bodyHit && !tagHit) return null;
+      return {
+        note: n,
+        snippet: bodyHit ? extractSnippet(bodyText, q) : ""
+      };
+    }).filter(Boolean).slice(0, 30);
+  }, [homeSearch, notes, tagName]);
+  return /*#__PURE__*/React.createElement("div", {
+    className: "dashboard"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "eyebrow",
+    style: {
+      color: "#6C5CE7"
+    }
+  }, "Home"), /*#__PURE__*/React.createElement("h1", null, "Your chart at a glance"), /*#__PURE__*/React.createElement("input", {
+    className: "home-search-input",
+    placeholder: "Search notes, tags, anything\u2026",
+    value: homeSearch,
+    onChange: e => setHomeSearch(e.target.value)
+  }), homeSearch.trim() ? /*#__PURE__*/React.createElement("div", {
+    className: "home-search-results"
+  }, searchResults.length === 0 ? /*#__PURE__*/React.createElement("p", {
+    className: "study-hint"
+  }, "No matches for \"", homeSearch.trim(), "\".") : searchResults.map(({
+    note,
+    snippet
+  }) => /*#__PURE__*/React.createElement("button", {
+    key: note.id,
+    className: "home-search-result",
+    onClick: () => onOpenNote(note.id)
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "home-search-result-top"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "home-search-result-title"
+  }, note.title), /*#__PURE__*/React.createElement("span", {
+    className: "home-search-result-location"
+  }, subjectPath(note.subjectId))), snippet && /*#__PURE__*/React.createElement("p", {
+    className: "home-search-result-snippet"
+  }, snippet), note.tagIds && note.tagIds.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "home-search-result-tags"
+  }, note.tagIds.map(tid => /*#__PURE__*/React.createElement("span", {
+    key: tid,
+    className: "tag-pill"
+  }, "#", tagName(tid))))))) : subjects.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "empty-state"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "empty-mark"
+  }, "\u2726"), /*#__PURE__*/React.createElement("h2", null, "Nothing here yet"), /*#__PURE__*/React.createElement("p", null, "Create a subject on the left, then start adding notes."), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    onClick: onNewSubject,
+    style: {
+      marginTop: 12
+    }
+  }, "+ New subject")) : /*#__PURE__*/React.createElement(React.Fragment, null, dueForecast && dueForecast.some(d => d.count > 0) && /*#__PURE__*/React.createElement("div", {
+    className: "forecast-section"
+  }, /*#__PURE__*/React.createElement("h2", {
+    className: "dashboard-subheading"
+  }, "Coming up"), /*#__PURE__*/React.createElement("div", {
+    className: "forecast-row"
+  }, dueForecast.map(d => /*#__PURE__*/React.createElement("div", {
+    key: d.label,
+    className: "forecast-day"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "forecast-bar-track"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "forecast-bar" + (d.count === 0 ? " zero" : ""),
+    style: {
+      height: `${Math.max(4, d.count / forecastMax * 100)}%`
+    }
+  })), /*#__PURE__*/React.createElement("span", {
+    className: "forecast-count"
+  }, d.count), /*#__PURE__*/React.createElement("span", {
+    className: "forecast-label"
+  }, d.label))))), globalTagStats.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "tag-study-section"
+  }, /*#__PURE__*/React.createElement("h2", {
+    className: "dashboard-subheading"
+  }, "Study by tag"), /*#__PURE__*/React.createElement("p", {
+    className: "study-hint"
+  }, "Every card with this tag, no matter which subject it's filed under."), /*#__PURE__*/React.createElement("div", {
+    className: "tag-study-list"
+  }, globalTagStats.map(t => /*#__PURE__*/React.createElement("div", {
+    key: t.id,
+    className: "tag-study-row"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "tag-pill"
+  }, "#", t.name), /*#__PURE__*/React.createElement("span", {
+    className: "tag-study-count"
+  }, t.count, " card", t.count === 1 ? "" : "s"), /*#__PURE__*/React.createElement("div", {
+    className: "tag-study-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small",
+    onClick: () => onStudyTag(t.id, t.name, "review")
+  }, "Cards"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small",
+    disabled: t.count < 4,
+    onClick: () => onStudyTag(t.id, t.name, "match")
+  }, "Match")))))), weakSpots.length === 0 ? /*#__PURE__*/React.createElement("p", {
+    className: "study-hint"
+  }, "Once you've reviewed some cards, this will show which tags you're weakest on so you know what to cram.") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("h2", {
+    className: "dashboard-subheading"
+  }, "Weakest tags"), /*#__PURE__*/React.createElement("p", {
+    className: "study-hint"
+  }, "Based on your review accuracy \u2014 lowest first."), /*#__PURE__*/React.createElement("table", {
+    className: "weak-table"
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "Subject"), /*#__PURE__*/React.createElement("th", null, "Tag"), /*#__PURE__*/React.createElement("th", null, "Accuracy"), /*#__PURE__*/React.createElement("th", null, "Attempts"), /*#__PURE__*/React.createElement("th", null))), /*#__PURE__*/React.createElement("tbody", null, weakSpots.map(w => /*#__PURE__*/React.createElement("tr", {
+    key: w.subjectId + w.tagId
+  }, /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("span", {
+    className: "weak-subject-dot",
+    style: {
+      background: subjectColor(w.subjectId)
+    }
+  }), subjectName(w.subjectId)), /*#__PURE__*/React.createElement("td", null, "#", tagName(w.tagId)), /*#__PURE__*/React.createElement("td", {
+    className: w.accuracy < 0.6 ? "weak-accuracy-low" : ""
+  }, Math.round(w.accuracy * 100), "%"), /*#__PURE__*/React.createElement("td", null, w.attempts), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small",
+    onClick: () => onNavigate(w.subjectId, w.tagId)
+  }, "Review")))))))));
 }
+
 // ---------- Export menu ----------
-function ExportMenu({ label, compact, onCopy, onDownload, onPdf, onShare }) {
-    const [open, setOpen] = useState(false);
-    const wrapRef = useRef(null);
-    useEffect(() => {
-        if (!open)
-            return;
-        const handleOutside = (e) => {
-            if (wrapRef.current && !wrapRef.current.contains(e.target))
-                setOpen(false);
-        };
-        document.addEventListener("mousedown", handleOutside);
-        return () => document.removeEventListener("mousedown", handleOutside);
-    }, [open]);
-    const run = (fn) => {
-        setOpen(false);
-        if (fn)
-            fn();
-    };
-    return (React.createElement("div", { className: "export-menu-wrap", ref: wrapRef },
-        React.createElement("button", { className: compact ? "" : "btn-ghost small", title: "Export & share", onClick: () => setOpen((o) => !o) }, compact ? "⤴" : `⤴ ${label || "Export"}`),
-        open && (React.createElement("div", { className: "export-menu" },
-            onCopy && React.createElement("button", { onClick: () => run(onCopy) }, "\u29C9 Copy as Markdown"),
-            onDownload && React.createElement("button", { onClick: () => run(onDownload) }, "\u21E9 Download .md"),
-            onPdf && React.createElement("button", { onClick: () => run(onPdf) }, "\uD83D\uDDB6 Download PDF"),
-            onShare && React.createElement("button", { onClick: () => run(onShare) }, "\u2197 Share\u2026")))));
+
+// The one place for getting files in and out: download a backup, upload one, move a single
+// subject, and import from other apps — with the steps spelled out, since moving a library
+// between devices (via a backup file kept in Google Drive) is how Brainly stays portable.
+function FilesPage({
+  exportBusy,
+  onExport,
+  importBusy,
+  onImportFile,
+  subjectImportBusy,
+  onImportSubjectFile,
+  kindleImportBusy,
+  onKindleFile,
+  onPdfFile,
+  mdImportBusy,
+  onMarkdownFile,
+  onAddArticle
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: "files-page"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "eyebrow",
+    style: {
+      color: "#6C5CE7"
+    }
+  }, "Files"), /*#__PURE__*/React.createElement("h1", null, "Download & upload"), /*#__PURE__*/React.createElement("p", {
+    className: "files-lede"
+  }, "Brainly keeps your notes on this device. To carry them with you, download a backup file, keep it in your Google Drive, and upload it on any other device."), /*#__PURE__*/React.createElement("section", {
+    className: "files-card"
+  }, /*#__PURE__*/React.createElement("h2", null, "1 \xB7 Download a backup"), /*#__PURE__*/React.createElement("p", null, "Saves all your subjects, notes, images and flashcards as one file."), /*#__PURE__*/React.createElement("div", {
+    className: "files-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    onClick: onExport,
+    disabled: exportBusy
+  }, exportBusy ? "Preparing…" : "⬇ Download backup")), /*#__PURE__*/React.createElement("ol", {
+    className: "files-steps"
+  }, /*#__PURE__*/React.createElement("li", null, "Tap ", /*#__PURE__*/React.createElement("b", null, "Download backup"), ". A file named ", /*#__PURE__*/React.createElement("code", null, "brainly-export-\u2026json"), " is saved to your Downloads folder (or wherever you choose)."), /*#__PURE__*/React.createElement("li", null, "Open Google Drive (the app, or drive.google.com) \u2192 ", /*#__PURE__*/React.createElement("b", null, "New \u2192 File upload"), " \u2192 pick that file."), /*#__PURE__*/React.createElement("li", null, "Repeat whenever you want a fresh copy. Every file is a complete snapshot, so you only need to keep the newest one."))), /*#__PURE__*/React.createElement("section", {
+    className: "files-card"
+  }, /*#__PURE__*/React.createElement("h2", null, "2 \xB7 Upload a backup"), /*#__PURE__*/React.createElement("p", null, "Loads a backup file onto this device \u2014 to restore, or to set up a new device."), /*#__PURE__*/React.createElement("div", {
+    className: "files-actions"
+  }, /*#__PURE__*/React.createElement("label", {
+    className: "btn-ghost file-label"
+  }, importBusy ? "Reading file…" : "⬆ Upload backup", /*#__PURE__*/React.createElement("input", {
+    type: "file",
+    accept: "application/json,.json",
+    className: "visually-hidden-file",
+    onChange: onImportFile,
+    disabled: importBusy
+  }))), /*#__PURE__*/React.createElement("ol", {
+    className: "files-steps"
+  }, /*#__PURE__*/React.createElement("li", null, "On the device you want to fill, tap ", /*#__PURE__*/React.createElement("b", null, "Upload backup"), "."), /*#__PURE__*/React.createElement("li", null, "Choose your file. On a phone, pick ", /*#__PURE__*/React.createElement("b", null, "Drive"), " in the file picker and select it. On a computer, download it from Drive first, then choose it here."), /*#__PURE__*/React.createElement("li", null, "Confirm when asked. ", /*#__PURE__*/React.createElement("b", null, "This replaces everything currently on this device"), ", so download a backup first if it has newer notes."))), /*#__PURE__*/React.createElement("section", {
+    className: "files-card"
+  }, /*#__PURE__*/React.createElement("h2", null, "3 \xB7 Move just one subject"), /*#__PURE__*/React.createElement("p", null, "Save or load a single subject (with its notes and cards) without touching anything else."), /*#__PURE__*/React.createElement("div", {
+    className: "files-actions"
+  }, /*#__PURE__*/React.createElement("label", {
+    className: "btn-ghost file-label"
+  }, subjectImportBusy ? "Reading file…" : "⬆ Upload a subject file", /*#__PURE__*/React.createElement("input", {
+    type: "file",
+    accept: "application/json,.json",
+    className: "visually-hidden-file",
+    onChange: onImportSubjectFile,
+    disabled: subjectImportBusy
+  }))), /*#__PURE__*/React.createElement("ol", {
+    className: "files-steps"
+  }, /*#__PURE__*/React.createElement("li", null, "To save one: open the subject and tap ", /*#__PURE__*/React.createElement("b", null, "Archive to file"), " at the top. Keep that file in Drive like a backup."), /*#__PURE__*/React.createElement("li", null, "To load one: tap ", /*#__PURE__*/React.createElement("b", null, "Upload a subject file"), " and choose it. It is ", /*#__PURE__*/React.createElement("b", null, "added"), " \u2014 nothing else changes. Uploading a newer copy of the same subject updates it instead of duplicating it."))), /*#__PURE__*/React.createElement("section", {
+    className: "files-card"
+  }, /*#__PURE__*/React.createElement("h2", null, "4 \xB7 Bring in notes from elsewhere"), /*#__PURE__*/React.createElement("div", {
+    className: "files-actions"
+  }, /*#__PURE__*/React.createElement("label", {
+    className: "btn-ghost file-label"
+  }, kindleImportBusy ? "Reading file…" : "📖 Kindle highlights", /*#__PURE__*/React.createElement("input", {
+    type: "file",
+    accept: ".html,.htm,text/html,.txt,text/plain",
+    className: "visually-hidden-file",
+    onChange: onKindleFile,
+    disabled: kindleImportBusy
+  })), /*#__PURE__*/React.createElement("label", {
+    className: "btn-ghost file-label"
+  }, "\uD83D\uDCC4 PDF", /*#__PURE__*/React.createElement("input", {
+    type: "file",
+    accept: "application/pdf,.pdf",
+    className: "visually-hidden-file",
+    onChange: onPdfFile
+  })), /*#__PURE__*/React.createElement("label", {
+    className: "btn-ghost file-label"
+  }, mdImportBusy ? "Reading file…" : "📝 Markdown (.md)", /*#__PURE__*/React.createElement("input", {
+    type: "file",
+    accept: ".md,text/markdown,text/plain",
+    className: "visually-hidden-file",
+    onChange: onMarkdownFile,
+    disabled: mdImportBusy
+  })), /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost",
+    onClick: onAddArticle
+  }, "\uD83D\uDD17 Web article")), /*#__PURE__*/React.createElement("ul", {
+    className: "files-steps"
+  }, /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Kindle highlights"), " \u2014 a Kindle Notebook export (.html) or ", /*#__PURE__*/React.createElement("i", null, "My Clippings.txt"), ". Lands in a \u201CKindle Highlights\u201D subject."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "PDF"), " \u2014 pulls out the text (and, if you like, page images). Lands in \u201CPDF Imports\u201D."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Markdown"), " \u2014 a .md file from Obsidian, Notion or anywhere else. Lands in \u201CImported Notes\u201D."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Web article"), " \u2014 paste a link and Brainly saves a readable copy. Lands in \u201CSaved Articles\u201D."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Share from other apps"), " \u2014 on Android, use ", /*#__PURE__*/React.createElement("b", null, "Share \u2192 Brainly"), " in any app to drop text or a link into your \u201CReview\u201D subject."))), /*#__PURE__*/React.createElement("p", {
+    className: "files-note"
+  }, "Everything stays on this device unless you download it. Clearing this site's data, or uninstalling the app, deletes your notes \u2014 so keep a backup file in Drive."));
 }
+function ExportMenu({
+  label,
+  compact,
+  onCopy,
+  onDownload,
+  onPdf,
+  onShare
+}) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const handleOutside = e => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handleOutside);
+    return () => document.removeEventListener("mousedown", handleOutside);
+  }, [open]);
+  const run = fn => {
+    setOpen(false);
+    if (fn) fn();
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    className: "export-menu-wrap",
+    ref: wrapRef
+  }, /*#__PURE__*/React.createElement("button", {
+    className: compact ? "" : "btn-ghost small",
+    title: "Export & share",
+    onClick: () => setOpen(o => !o)
+  }, compact ? "⤴" : `⤴ ${label || "Export"}`), open && /*#__PURE__*/React.createElement("div", {
+    className: "export-menu"
+  }, onCopy && /*#__PURE__*/React.createElement("button", {
+    onClick: () => run(onCopy)
+  }, "\u29C9 Copy as Markdown"), onDownload && /*#__PURE__*/React.createElement("button", {
+    onClick: () => run(onDownload)
+  }, "\u21E9 Download .md"), onPdf && /*#__PURE__*/React.createElement("button", {
+    onClick: () => run(onPdf)
+  }, "\uD83D\uDDB6 Download PDF"), onShare && /*#__PURE__*/React.createElement("button", {
+    onClick: () => run(onShare)
+  }, "\u2197 Share\u2026")));
+}
+
 // ---------- Confirm dialog ----------
+
 // ---------- Passcode lock screen ----------
-function LockScreen({ pinHash, onUnlock }) {
-    const [pin, setPin] = useState("");
-    const [error, setError] = useState("");
-    const [busy, setBusy] = useState(false);
-    const submit = async () => {
-        if (!pin || busy)
-            return;
-        setBusy(true);
-        const hash = await hashPin(pin);
-        setBusy(false);
-        if (hash === pinHash) {
-            onUnlock();
-        }
-        else {
-            setError("Incorrect passcode");
-            setPin("");
-        }
-    };
-    return (React.createElement("div", { className: "lock-screen" },
-        React.createElement("div", { className: "lock-screen-card" },
-            React.createElement("div", { className: "lock-screen-icon" }, "\uD83D\uDD12"),
-            React.createElement("h2", null, "Enter your passcode"),
-            React.createElement("input", { type: "password", inputMode: "numeric", className: "pin-input", value: pin, onChange: (e) => setPin(e.target.value), onKeyDown: (e) => { if (e.key === "Enter")
-                    submit(); }, autoFocus: true }),
-            error && React.createElement("p", { className: "lock-screen-error" }, error),
-            React.createElement("button", { className: "btn-primary", onClick: submit, disabled: busy || !pin }, "Unlock"))));
+
+function LockScreen({
+  pinHash,
+  onUnlock
+}) {
+  const [pin, setPin] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    if (!pin || busy) return;
+    setBusy(true);
+    const hash = await hashPin(pin);
+    setBusy(false);
+    if (hash === pinHash) {
+      onUnlock();
+    } else {
+      setError("Incorrect passcode");
+      setPin("");
+    }
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    className: "lock-screen"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "lock-screen-card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "lock-screen-icon"
+  }, "\uD83D\uDD12"), /*#__PURE__*/React.createElement("h2", null, "Enter your passcode"), /*#__PURE__*/React.createElement("input", {
+    type: "password",
+    inputMode: "numeric",
+    className: "pin-input",
+    value: pin,
+    onChange: e => setPin(e.target.value),
+    onKeyDown: e => {
+      if (e.key === "Enter") submit();
+    },
+    autoFocus: true
+  }), error && /*#__PURE__*/React.createElement("p", {
+    className: "lock-screen-error"
+  }, error), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    onClick: submit,
+    disabled: busy || !pin
+  }, "Unlock")));
 }
-function AskLibraryModal({ subjects, scope, onScopeChange, question, onQuestionChange, answer, coverage, busy, error, onAsk, onCancel }) {
-    return (React.createElement("div", { className: "modal-backdrop", onClick: busy ? undefined : onCancel },
-        React.createElement("div", { className: "modal confirm-modal", onClick: (e) => e.stopPropagation() },
-            React.createElement("div", { className: "modal-header" },
-                React.createElement("span", { className: "eyebrow" }, "Ask your library"),
-                !busy && React.createElement("button", { className: "modal-close", onClick: onCancel }, "\u2715")),
-            React.createElement("select", { className: "url-input", value: scope, onChange: (e) => onScopeChange(e.target.value), disabled: busy },
-                React.createElement("option", { value: "all" }, "All subjects"),
-                subjects.map((s) => (React.createElement("option", { key: s.id, value: s.id }, s.name)))),
-            React.createElement("div", { className: "ai-key-row" },
-                React.createElement("input", { className: "url-input", placeholder: "Ask a question\u2026", value: question, onChange: (e) => onQuestionChange(e.target.value), onKeyDown: (e) => { if (e.key === "Enter")
-                        onAsk(); }, disabled: busy, autoFocus: true }),
-                React.createElement("button", { className: "btn-primary small", onClick: onAsk, disabled: busy || !question.trim() }, busy ? "Asking…" : "Ask")),
-            error && React.createElement("p", { className: "lock-screen-error" }, error),
-            answer && (React.createElement("div", { className: "ai-result-box" },
-                React.createElement("p", null, answer),
-                coverage && coverage.includedCount < coverage.totalCount && (React.createElement("p", { className: "ai-settings-hint" },
-                    "Based on ",
-                    coverage.includedCount,
-                    " of ",
-                    coverage.totalCount,
-                    " notes in scope \u2014 the rest didn't fit in one request.")))),
-            React.createElement("div", { className: "modal-actions" },
-                React.createElement("button", { className: "btn-ghost", onClick: onCancel }, "Close")))));
+function AddArticleModal({
+  busy,
+  error,
+  onCancel,
+  onConfirm
+}) {
+  const [url, setUrl] = useState("");
+  const isValidUrl = /^https?:\/\/\S+$/i.test(url.trim());
+  return /*#__PURE__*/React.createElement("div", {
+    className: "modal-backdrop",
+    onClick: busy ? undefined : onCancel
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal confirm-modal",
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal-header"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "eyebrow"
+  }, "Save article by URL"), !busy && /*#__PURE__*/React.createElement("button", {
+    className: "modal-close",
+    onClick: onCancel
+  }, "\u2715")), /*#__PURE__*/React.createElement("p", {
+    className: "modal-copy"
+  }, "Paste a web article's link \u2014 this lands in a \"Saved Articles\" subject."), /*#__PURE__*/React.createElement("input", {
+    type: "url",
+    className: "url-input",
+    placeholder: "https://example.com/article",
+    value: url,
+    onChange: e => setUrl(e.target.value),
+    disabled: busy,
+    autoFocus: true
+  }), error && /*#__PURE__*/React.createElement("p", {
+    className: "lock-screen-error"
+  }, error), /*#__PURE__*/React.createElement("div", {
+    className: "modal-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost",
+    onClick: onCancel,
+    disabled: busy
+  }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    onClick: () => onConfirm(url.trim()),
+    disabled: busy || !isValidUrl
+  }, busy ? "Fetching…" : "Save"))));
 }
-function AddArticleModal({ busy, error, onCancel, onConfirm }) {
-    const [url, setUrl] = useState("");
-    const isValidUrl = /^https?:\/\/\S+$/i.test(url.trim());
-    return (React.createElement("div", { className: "modal-backdrop", onClick: busy ? undefined : onCancel },
-        React.createElement("div", { className: "modal confirm-modal", onClick: (e) => e.stopPropagation() },
-            React.createElement("div", { className: "modal-header" },
-                React.createElement("span", { className: "eyebrow" }, "Save article by URL"),
-                !busy && React.createElement("button", { className: "modal-close", onClick: onCancel }, "\u2715")),
-            React.createElement("p", { className: "modal-copy" }, "Paste a web article's link \u2014 this lands in a \"Saved Articles\" subject."),
-            React.createElement("input", { type: "url", className: "url-input", placeholder: "https://example.com/article", value: url, onChange: (e) => setUrl(e.target.value), disabled: busy, autoFocus: true }),
-            error && React.createElement("p", { className: "lock-screen-error" }, error),
-            React.createElement("div", { className: "modal-actions" },
-                React.createElement("button", { className: "btn-ghost", onClick: onCancel, disabled: busy }, "Cancel"),
-                React.createElement("button", { className: "btn-primary", onClick: () => onConfirm(url.trim()), disabled: busy || !isValidUrl }, busy ? "Fetching…" : "Save")))));
+function PdfImportModal({
+  filename,
+  busy,
+  error,
+  onCancel,
+  onConfirm
+}) {
+  const [includeImages, setIncludeImages] = useState(false);
+  return /*#__PURE__*/React.createElement("div", {
+    className: "modal-backdrop",
+    onClick: busy ? undefined : onCancel
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal confirm-modal",
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal-header"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "eyebrow"
+  }, "Import PDF"), !busy && /*#__PURE__*/React.createElement("button", {
+    className: "modal-close",
+    onClick: onCancel
+  }, "\u2715")), /*#__PURE__*/React.createElement("p", {
+    className: "modal-copy"
+  }, "Import \"", filename, "\"? This lands in a \"PDF Imports\" subject."), /*#__PURE__*/React.createElement("label", {
+    className: "checkbox-row"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: includeImages,
+    onChange: e => setIncludeImages(e.target.checked),
+    disabled: busy
+  }), "Include page images (slower, uses more storage)"), error && /*#__PURE__*/React.createElement("p", {
+    className: "lock-screen-error"
+  }, error), /*#__PURE__*/React.createElement("div", {
+    className: "modal-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost",
+    onClick: onCancel,
+    disabled: busy
+  }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    onClick: () => onConfirm(includeImages),
+    disabled: busy
+  }, busy ? "Reading PDF…" : "Import"))));
 }
-function PdfImportModal({ filename, busy, error, onCancel, onConfirm }) {
-    const [includeImages, setIncludeImages] = useState(false);
-    return (React.createElement("div", { className: "modal-backdrop", onClick: busy ? undefined : onCancel },
-        React.createElement("div", { className: "modal confirm-modal", onClick: (e) => e.stopPropagation() },
-            React.createElement("div", { className: "modal-header" },
-                React.createElement("span", { className: "eyebrow" }, "Import PDF"),
-                !busy && React.createElement("button", { className: "modal-close", onClick: onCancel }, "\u2715")),
-            React.createElement("p", { className: "modal-copy" },
-                "Import \"",
-                filename,
-                "\"? This lands in a \"PDF Imports\" subject."),
-            React.createElement("label", { className: "checkbox-row" },
-                React.createElement("input", { type: "checkbox", checked: includeImages, onChange: (e) => setIncludeImages(e.target.checked), disabled: busy }),
-                "Include page images (slower, uses more storage)"),
-            error && React.createElement("p", { className: "lock-screen-error" }, error),
-            React.createElement("div", { className: "modal-actions" },
-                React.createElement("button", { className: "btn-ghost", onClick: onCancel, disabled: busy }, "Cancel"),
-                React.createElement("button", { className: "btn-primary", onClick: () => onConfirm(includeImages), disabled: busy }, busy ? "Reading PDF…" : "Import")))));
+function PinModal({
+  mode,
+  onVerify,
+  onSetNew,
+  onCancel
+}) {
+  // mode: "set" (no current pin needed) | "change" | "remove" (both verify first)
+  const [phase, setPhase] = useState(mode === "set" ? "new" : "verify");
+  const [currentPin, setCurrentPin] = useState("");
+  const [newPin, setNewPin] = useState("");
+  const [confirmPin, setConfirmPin] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submitVerify = async () => {
+    setBusy(true);
+    const ok = await onVerify(currentPin);
+    setBusy(false);
+    if (!ok) {
+      setError("Incorrect passcode");
+      setCurrentPin("");
+      return;
+    }
+    setError("");
+    if (mode === "remove") {
+      setBusy(true);
+      await onSetNew(null);
+      setBusy(false);
+    } else {
+      setPhase("new");
+    }
+  };
+  const submitNew = () => {
+    if (!/^\d{4,12}$/.test(newPin)) {
+      setError("Use 4 to 12 digits");
+      return;
+    }
+    setError("");
+    setPhase("confirm");
+  };
+  const submitConfirm = async () => {
+    if (confirmPin !== newPin) {
+      setError("Passcodes don't match");
+      setConfirmPin("");
+      return;
+    }
+    setBusy(true);
+    await onSetNew(newPin);
+    setBusy(false);
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    className: "modal-backdrop",
+    onClick: onCancel
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal confirm-modal",
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal-header"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "eyebrow"
+  }, mode === "remove" ? "Remove passcode" : mode === "change" ? "Change passcode" : "Set a passcode"), /*#__PURE__*/React.createElement("button", {
+    className: "modal-close",
+    onClick: onCancel
+  }, "\u2715")), phase === "verify" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+    className: "modal-copy"
+  }, "Enter your current passcode to continue."), /*#__PURE__*/React.createElement("input", {
+    type: "password",
+    inputMode: "numeric",
+    className: "pin-input",
+    value: currentPin,
+    onChange: e => setCurrentPin(e.target.value),
+    autoFocus: true
+  }), error && /*#__PURE__*/React.createElement("p", {
+    className: "lock-screen-error"
+  }, error), /*#__PURE__*/React.createElement("div", {
+    className: "modal-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost",
+    onClick: onCancel
+  }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    onClick: submitVerify,
+    disabled: busy || !currentPin
+  }, "Continue"))), phase === "new" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+    className: "modal-copy"
+  }, "Choose a passcode (4 to 12 digits). This is a lock screen, not encryption \u2014 and if you forget it, there's no way to recover it. Write it down somewhere safe."), /*#__PURE__*/React.createElement("input", {
+    type: "password",
+    inputMode: "numeric",
+    className: "pin-input",
+    value: newPin,
+    onChange: e => setNewPin(e.target.value),
+    autoFocus: true
+  }), error && /*#__PURE__*/React.createElement("p", {
+    className: "lock-screen-error"
+  }, error), /*#__PURE__*/React.createElement("div", {
+    className: "modal-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost",
+    onClick: onCancel
+  }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    onClick: submitNew,
+    disabled: !newPin
+  }, "Continue"))), phase === "confirm" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+    className: "modal-copy"
+  }, "Enter it again to confirm."), /*#__PURE__*/React.createElement("input", {
+    type: "password",
+    inputMode: "numeric",
+    className: "pin-input",
+    value: confirmPin,
+    onChange: e => setConfirmPin(e.target.value),
+    autoFocus: true
+  }), error && /*#__PURE__*/React.createElement("p", {
+    className: "lock-screen-error"
+  }, error), /*#__PURE__*/React.createElement("div", {
+    className: "modal-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost",
+    onClick: onCancel
+  }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    onClick: submitConfirm,
+    disabled: busy || !confirmPin
+  }, "Save passcode")))));
 }
-function PinModal({ mode, onVerify, onSetNew, onCancel }) {
-    // mode: "set" (no current pin needed) | "change" | "remove" (both verify first)
-    const [phase, setPhase] = useState(mode === "set" ? "new" : "verify");
-    const [currentPin, setCurrentPin] = useState("");
-    const [newPin, setNewPin] = useState("");
-    const [confirmPin, setConfirmPin] = useState("");
-    const [error, setError] = useState("");
-    const [busy, setBusy] = useState(false);
-    const submitVerify = async () => {
-        setBusy(true);
-        const ok = await onVerify(currentPin);
-        setBusy(false);
-        if (!ok) {
-            setError("Incorrect passcode");
-            setCurrentPin("");
-            return;
-        }
-        setError("");
-        if (mode === "remove") {
-            setBusy(true);
-            await onSetNew(null);
-            setBusy(false);
-        }
-        else {
-            setPhase("new");
-        }
-    };
-    const submitNew = () => {
-        if (!/^\d{4,12}$/.test(newPin)) {
-            setError("Use 4 to 12 digits");
-            return;
-        }
-        setError("");
-        setPhase("confirm");
-    };
-    const submitConfirm = async () => {
-        if (confirmPin !== newPin) {
-            setError("Passcodes don't match");
-            setConfirmPin("");
-            return;
-        }
-        setBusy(true);
-        await onSetNew(newPin);
-        setBusy(false);
-    };
-    return (React.createElement("div", { className: "modal-backdrop", onClick: onCancel },
-        React.createElement("div", { className: "modal confirm-modal", onClick: (e) => e.stopPropagation() },
-            React.createElement("div", { className: "modal-header" },
-                React.createElement("span", { className: "eyebrow" }, mode === "remove" ? "Remove passcode" : mode === "change" ? "Change passcode" : "Set a passcode"),
-                React.createElement("button", { className: "modal-close", onClick: onCancel }, "\u2715")),
-            phase === "verify" && (React.createElement(React.Fragment, null,
-                React.createElement("p", { className: "modal-copy" }, "Enter your current passcode to continue."),
-                React.createElement("input", { type: "password", inputMode: "numeric", className: "pin-input", value: currentPin, onChange: (e) => setCurrentPin(e.target.value), autoFocus: true }),
-                error && React.createElement("p", { className: "lock-screen-error" }, error),
-                React.createElement("div", { className: "modal-actions" },
-                    React.createElement("button", { className: "btn-ghost", onClick: onCancel }, "Cancel"),
-                    React.createElement("button", { className: "btn-primary", onClick: submitVerify, disabled: busy || !currentPin }, "Continue")))),
-            phase === "new" && (React.createElement(React.Fragment, null,
-                React.createElement("p", { className: "modal-copy" }, "Choose a passcode (4 to 12 digits). This is a lock screen, not encryption \u2014 and if you forget it, there's no way to recover it. Write it down somewhere safe."),
-                React.createElement("input", { type: "password", inputMode: "numeric", className: "pin-input", value: newPin, onChange: (e) => setNewPin(e.target.value), autoFocus: true }),
-                error && React.createElement("p", { className: "lock-screen-error" }, error),
-                React.createElement("div", { className: "modal-actions" },
-                    React.createElement("button", { className: "btn-ghost", onClick: onCancel }, "Cancel"),
-                    React.createElement("button", { className: "btn-primary", onClick: submitNew, disabled: !newPin }, "Continue")))),
-            phase === "confirm" && (React.createElement(React.Fragment, null,
-                React.createElement("p", { className: "modal-copy" }, "Enter it again to confirm."),
-                React.createElement("input", { type: "password", inputMode: "numeric", className: "pin-input", value: confirmPin, onChange: (e) => setConfirmPin(e.target.value), autoFocus: true }),
-                error && React.createElement("p", { className: "lock-screen-error" }, error),
-                React.createElement("div", { className: "modal-actions" },
-                    React.createElement("button", { className: "btn-ghost", onClick: onCancel }, "Cancel"),
-                    React.createElement("button", { className: "btn-primary", onClick: submitConfirm, disabled: busy || !confirmPin }, "Save passcode")))))));
+function ConfirmDialog({
+  message,
+  onCancel,
+  onConfirm,
+  confirmLabel
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: "modal-backdrop",
+    onClick: onCancel
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal confirm-modal",
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "modal-copy"
+  }, message), /*#__PURE__*/React.createElement("div", {
+    className: "modal-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost",
+    onClick: onCancel
+  }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost danger",
+    onClick: onConfirm
+  }, confirmLabel || "Delete"))));
 }
-function ConfirmDialog({ message, onCancel, onConfirm, confirmLabel }) {
-    return (React.createElement("div", { className: "modal-backdrop", onClick: onCancel },
-        React.createElement("div", { className: "modal confirm-modal", onClick: (e) => e.stopPropagation() },
-            React.createElement("p", { className: "modal-copy" }, message),
-            React.createElement("div", { className: "modal-actions" },
-                React.createElement("button", { className: "btn-ghost", onClick: onCancel }, "Cancel"),
-                React.createElement("button", { className: "btn-ghost danger", onClick: onConfirm }, confirmLabel || "Delete")))));
-}
+
 // ---------- Image lightbox (view + zoom) ----------
-function ImageLightbox({ src, onClose }) {
-    const [zoom, setZoom] = useState(1);
-    useEffect(() => {
-        const handleKey = (e) => {
-            if (e.key === "Escape")
-                onClose();
-            else if (e.key === "+" || e.key === "=")
-                setZoom((z) => Math.min(3, z + 0.25));
-            else if (e.key === "-")
-                setZoom((z) => Math.max(0.5, z - 0.25));
-        };
-        window.addEventListener("keydown", handleKey);
-        return () => window.removeEventListener("keydown", handleKey);
-    }, []);
-    return (React.createElement("div", { className: "lightbox-backdrop", onClick: onClose },
-        React.createElement("div", { className: "lightbox-toolbar", onClick: (e) => e.stopPropagation() },
-            React.createElement("button", { onClick: () => setZoom((z) => Math.max(0.5, z - 0.25)), title: "Zoom out" }, "\u2212"),
-            React.createElement("span", { className: "lightbox-zoom-level" },
-                Math.round(zoom * 100),
-                "%"),
-            React.createElement("button", { onClick: () => setZoom((z) => Math.min(3, z + 0.25)), title: "Zoom in" }, "+"),
-            React.createElement("button", { onClick: () => setZoom(1), title: "Reset zoom" }, "Reset"),
-            React.createElement("button", { className: "lightbox-close", onClick: onClose, title: "Close" }, "\u2715")),
-        React.createElement("div", { className: "lightbox-scroll", onClick: (e) => e.stopPropagation() },
-            React.createElement("img", { src: src, alt: "", className: "lightbox-image", style: { transform: `scale(${zoom})` }, onDoubleClick: () => setZoom((z) => (z === 1 ? 2 : 1)), draggable: false }))));
-}
-function BulkTagModal({ count, allTags, onCancel, onApply }) {
-    const [tagInput, setTagInput] = useState("");
-    const [tagNames, setTagNames] = useState([]);
-    const addTagFromInput = () => {
-        const parts = tagInput.split(",").map((p) => p.trim()).filter(Boolean);
-        if (!parts.length)
-            return;
-        setTagNames((cur) => [...new Set([...cur, ...parts])]);
-        setTagInput("");
+
+function ImageLightbox({
+  src,
+  onClose
+}) {
+  const [zoom, setZoom] = useState(1);
+  useEffect(() => {
+    const handleKey = e => {
+      if (e.key === "Escape") onClose();else if (e.key === "+" || e.key === "=") setZoom(z => Math.min(3, z + 0.25));else if (e.key === "-") setZoom(z => Math.max(0.5, z - 0.25));
     };
-    const removeTag = (name) => setTagNames((cur) => cur.filter((t) => t !== name));
-    return (React.createElement("div", { className: "modal-backdrop", onClick: onCancel },
-        React.createElement("div", { className: "modal", onClick: (e) => e.stopPropagation() },
-            React.createElement("div", { className: "modal-header" },
-                React.createElement("span", { className: "eyebrow" },
-                    "Add tag to ",
-                    count,
-                    " note",
-                    count === 1 ? "" : "s"),
-                React.createElement("button", { className: "modal-close", onClick: onCancel }, "\u2715")),
-            React.createElement("div", { className: "tag-input-row" },
-                React.createElement("div", { className: "tag-pills-edit" },
-                    tagNames.map((t) => (React.createElement("span", { key: t, className: "tag-pill editable" },
-                        "#",
-                        t,
-                        " ",
-                        React.createElement("button", { onClick: () => removeTag(t) }, "\u2715")))),
-                    React.createElement("input", { placeholder: "Add tag, comma or enter", value: tagInput, onChange: (e) => setTagInput(e.target.value), onKeyDown: (e) => {
-                            if (e.key === "Enter" || e.key === ",") {
-                                e.preventDefault();
-                                addTagFromInput();
-                            }
-                        }, onBlur: addTagFromInput, autoFocus: true })),
-                allTags.length > 0 && (React.createElement("div", { className: "existing-tags" }, allTags.filter((t) => !tagNames.includes(t.name)).slice(0, 10).map((t) => (React.createElement("button", { key: t.id, className: "existing-tag-btn", onClick: () => setTagNames((cur) => [...cur, t.name]) },
-                    "+",
-                    t.name)))))),
-            React.createElement("div", { className: "modal-actions" },
-                React.createElement("button", { className: "btn-ghost", onClick: onCancel }, "Cancel"),
-                React.createElement("button", { className: "btn-primary", disabled: tagNames.length === 0, onClick: () => onApply(tagNames) },
-                    "Apply to ",
-                    count,
-                    " note",
-                    count === 1 ? "" : "s")))));
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, []);
+  return /*#__PURE__*/React.createElement("div", {
+    className: "lightbox-backdrop",
+    onClick: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "lightbox-toolbar",
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setZoom(z => Math.max(0.5, z - 0.25)),
+    title: "Zoom out"
+  }, "\u2212"), /*#__PURE__*/React.createElement("span", {
+    className: "lightbox-zoom-level"
+  }, Math.round(zoom * 100), "%"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setZoom(z => Math.min(3, z + 0.25)),
+    title: "Zoom in"
+  }, "+"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setZoom(1),
+    title: "Reset zoom"
+  }, "Reset"), /*#__PURE__*/React.createElement("button", {
+    className: "lightbox-close",
+    onClick: onClose,
+    title: "Close"
+  }, "\u2715")), /*#__PURE__*/React.createElement("div", {
+    className: "lightbox-scroll",
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("img", {
+    src: src,
+    alt: "",
+    className: "lightbox-image",
+    style: {
+      transform: `scale(${zoom})`
+    },
+    onDoubleClick: () => setZoom(z => z === 1 ? 2 : 1),
+    draggable: false
+  })));
 }
-function BulkMoveModal({ count, subjectOptions, onCancel, onApply }) {
-    const [mode, setMode] = useState("existing"); // "existing" | "new"
-    const [targetSubjectId, setTargetSubjectId] = useState("");
-    const [newSubjectName, setNewSubjectName] = useState("");
-    const canApply = mode === "existing" ? !!targetSubjectId : newSubjectName.trim().length > 0;
-    return (React.createElement("div", { className: "modal-backdrop", onClick: onCancel },
-        React.createElement("div", { className: "modal", onClick: (e) => e.stopPropagation() },
-            React.createElement("div", { className: "modal-header" },
-                React.createElement("span", { className: "eyebrow" },
-                    "Move ",
-                    count,
-                    " note",
-                    count === 1 ? "" : "s"),
-                React.createElement("button", { className: "modal-close", onClick: onCancel }, "\u2715")),
-            React.createElement("div", { className: "bulk-move-mode-toggle" },
-                React.createElement("button", { className: "btn-ghost small" + (mode === "existing" ? " active-toggle" : ""), onClick: () => setMode("existing") }, "To an existing subject"),
-                React.createElement("button", { className: "btn-ghost small" + (mode === "new" ? " active-toggle" : ""), onClick: () => setMode("new") }, "Create a new sub-subject")),
-            mode === "existing" ? (React.createElement("select", { className: "parent-select", value: targetSubjectId, onChange: (e) => setTargetSubjectId(e.target.value) },
-                React.createElement("option", { value: "", disabled: true }, "Choose a subject\u2026"),
-                subjectOptions.map((s) => (React.createElement("option", { key: s.id, value: s.id }, s.label))))) : (React.createElement("input", { className: "link-search-input", placeholder: "New sub-subject name", value: newSubjectName, onChange: (e) => setNewSubjectName(e.target.value), autoFocus: true })),
-            React.createElement("div", { className: "modal-actions" },
-                React.createElement("button", { className: "btn-ghost", onClick: onCancel }, "Cancel"),
-                React.createElement("button", { className: "btn-primary", disabled: !canApply, onClick: () => onApply(mode, mode === "existing" ? targetSubjectId : newSubjectName.trim()) }, "Move")))));
+function BulkTagModal({
+  count,
+  allTags,
+  onCancel,
+  onApply
+}) {
+  const [tagInput, setTagInput] = useState("");
+  const [tagNames, setTagNames] = useState([]);
+  const addTagFromInput = () => {
+    const parts = tagInput.split(",").map(p => p.trim()).filter(Boolean);
+    if (!parts.length) return;
+    setTagNames(cur => [...new Set([...cur, ...parts])]);
+    setTagInput("");
+  };
+  const removeTag = name => setTagNames(cur => cur.filter(t => t !== name));
+  return /*#__PURE__*/React.createElement("div", {
+    className: "modal-backdrop",
+    onClick: onCancel
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal",
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal-header"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "eyebrow"
+  }, "Add tag to ", count, " note", count === 1 ? "" : "s"), /*#__PURE__*/React.createElement("button", {
+    className: "modal-close",
+    onClick: onCancel
+  }, "\u2715")), /*#__PURE__*/React.createElement("div", {
+    className: "tag-input-row"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "tag-pills-edit"
+  }, tagNames.map(t => /*#__PURE__*/React.createElement("span", {
+    key: t,
+    className: "tag-pill editable"
+  }, "#", t, " ", /*#__PURE__*/React.createElement("button", {
+    onClick: () => removeTag(t)
+  }, "\u2715"))), /*#__PURE__*/React.createElement("input", {
+    placeholder: "Add tag, comma or enter",
+    value: tagInput,
+    onChange: e => setTagInput(e.target.value),
+    onKeyDown: e => {
+      if (e.key === "Enter" || e.key === ",") {
+        e.preventDefault();
+        addTagFromInput();
+      }
+    },
+    onBlur: addTagFromInput,
+    autoFocus: true
+  })), allTags.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "existing-tags"
+  }, allTags.filter(t => !tagNames.includes(t.name)).slice(0, 10).map(t => /*#__PURE__*/React.createElement("button", {
+    key: t.id,
+    className: "existing-tag-btn",
+    onClick: () => setTagNames(cur => [...cur, t.name])
+  }, "+", t.name)))), /*#__PURE__*/React.createElement("div", {
+    className: "modal-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost",
+    onClick: onCancel
+  }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    disabled: tagNames.length === 0,
+    onClick: () => onApply(tagNames)
+  }, "Apply to ", count, " note", count === 1 ? "" : "s"))));
 }
+function BulkMoveModal({
+  count,
+  subjectOptions,
+  onCancel,
+  onApply
+}) {
+  const [mode, setMode] = useState("existing"); // "existing" | "new"
+  const [targetSubjectId, setTargetSubjectId] = useState("");
+  const [newSubjectName, setNewSubjectName] = useState("");
+  const canApply = mode === "existing" ? !!targetSubjectId : newSubjectName.trim().length > 0;
+  return /*#__PURE__*/React.createElement("div", {
+    className: "modal-backdrop",
+    onClick: onCancel
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal",
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal-header"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "eyebrow"
+  }, "Move ", count, " note", count === 1 ? "" : "s"), /*#__PURE__*/React.createElement("button", {
+    className: "modal-close",
+    onClick: onCancel
+  }, "\u2715")), /*#__PURE__*/React.createElement("div", {
+    className: "bulk-move-mode-toggle"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small" + (mode === "existing" ? " active-toggle" : ""),
+    onClick: () => setMode("existing")
+  }, "To an existing subject"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small" + (mode === "new" ? " active-toggle" : ""),
+    onClick: () => setMode("new")
+  }, "Create a new sub-subject")), mode === "existing" ? /*#__PURE__*/React.createElement("select", {
+    className: "parent-select",
+    value: targetSubjectId,
+    onChange: e => setTargetSubjectId(e.target.value)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "",
+    disabled: true
+  }, "Choose a subject\u2026"), subjectOptions.map(s => /*#__PURE__*/React.createElement("option", {
+    key: s.id,
+    value: s.id
+  }, s.label))) : /*#__PURE__*/React.createElement("input", {
+    className: "link-search-input",
+    placeholder: "New sub-subject name",
+    value: newSubjectName,
+    onChange: e => setNewSubjectName(e.target.value),
+    autoFocus: true
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "modal-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost",
+    onClick: onCancel
+  }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    disabled: !canApply,
+    onClick: () => onApply(mode, mode === "existing" ? targetSubjectId : newSubjectName.trim())
+  }, "Move"))));
+}
+
 // ---------- Rich text editor ----------
 // contentEditable is kept "uncontrolled" from React's perspective on purpose:
 // we set dangerouslySetInnerHTML once from a ref captured at mount, and never
 // feed live keystroke state back into it. Feeding live state back in would
 // make React reset the DOM (and the cursor position) on every keystroke.
-function RichTextEditor({ initialHTML, onChange, onHighlight, placeholder, onImageError, onOccludeImage, tall }) {
-    const editorRef = useRef(null);
-    const initialRef = useRef(initialHTML || "");
-    const [selectionToolbar, setSelectionToolbar] = useState(null); // { top, left } | null
-    const selectedImageElRef = useRef(null); // the actual <img> DOM node currently selected, or null
-    const [imageToolbarPos, setImageToolbarPos] = useState(null); // { top, left, placement } | null
-    const applyCmd = (cmd, value) => {
-        if (editorRef.current)
-            editorRef.current.focus();
-        document.execCommand(cmd, false, value);
-        if (editorRef.current)
-            onChange(editorRef.current.innerHTML);
+
+function RichTextEditor({
+  initialHTML,
+  onChange,
+  onHighlight,
+  placeholder,
+  onImageError,
+  onOccludeImage,
+  tall
+}) {
+  const editorRef = useRef(null);
+  const initialRef = useRef(initialHTML || "");
+  const [selectionToolbar, setSelectionToolbar] = useState(null); // { top, left } | null
+  const selectedImageElRef = useRef(null); // the actual <img> DOM node currently selected, or null
+  const [imageToolbarPos, setImageToolbarPos] = useState(null); // { top, left, placement } | null
+
+  const applyCmd = (cmd, value) => {
+    if (editorRef.current) editorRef.current.focus();
+    document.execCommand(cmd, false, value);
+    if (editorRef.current) onChange(editorRef.current.innerHTML);
+  };
+  const deselectImage = () => {
+    selectedImageElRef.current = null;
+    setImageToolbarPos(null);
+  };
+
+  // The toolbar prefers to sit just above whatever it's attached to, but
+  // that only works if there's room — a large image near the top of the
+  // note (right under the fixed header) would push an "always above"
+  // toolbar off-screen or behind the header, making it genuinely
+  // invisible rather than just easy to miss. Below is the fallback.
+  const TOOLBAR_CLEARANCE = 70;
+  const computeToolbarPos = rect => {
+    const placement = rect.top < TOOLBAR_CLEARANCE ? "below" : "above";
+    return {
+      top: placement === "above" ? rect.top : rect.bottom,
+      left: rect.left + rect.width / 2,
+      placement
     };
-    const deselectImage = () => {
-        selectedImageElRef.current = null;
-        setImageToolbarPos(null);
+  };
+  const selectImage = el => {
+    selectedImageElRef.current = el;
+    setImageToolbarPos(computeToolbarPos(el.getBoundingClientRect()));
+  };
+  const handleBodyClick = e => {
+    if (e.target && e.target.tagName === "IMG" && e.target.classList.contains("rte-inline-image")) {
+      selectImage(e.target);
+    } else if (selectedImageElRef.current) {
+      deselectImage();
+    }
+  };
+  const resizeSelectedImage = percent => {
+    const el = selectedImageElRef.current;
+    if (!el) return;
+    el.style.width = percent + "%";
+    el.style.height = "auto";
+    if (editorRef.current) onChange(editorRef.current.innerHTML);
+    setImageToolbarPos(computeToolbarPos(el.getBoundingClientRect()));
+  };
+  const removeSelectedImage = () => {
+    const el = selectedImageElRef.current;
+    if (!el) return;
+    el.remove();
+    if (editorRef.current) onChange(editorRef.current.innerHTML);
+    deselectImage();
+  };
+  const [annotatingImage, setAnnotatingImage] = useState(null); // the <img> DOM element currently being annotated, or null
+
+  const openAnnotateImage = () => {
+    if (selectedImageElRef.current) setAnnotatingImage(selectedImageElRef.current);
+  };
+  const saveAnnotatedImage = dataUrl => {
+    if (annotatingImage) {
+      annotatingImage.src = dataUrl;
+      if (editorRef.current) onChange(editorRef.current.innerHTML);
+    }
+    setAnnotatingImage(null);
+    deselectImage();
+  };
+
+  // Keeps the image toolbar correctly positioned while scrolling, and
+  // dismisses it on a click anywhere outside the selected image or the
+  // toolbar itself.
+  useEffect(() => {
+    const reposition = () => {
+      const el = selectedImageElRef.current;
+      if (!el || !document.body.contains(el)) {
+        if (el) deselectImage();
+        return;
+      }
+      setImageToolbarPos(computeToolbarPos(el.getBoundingClientRect()));
     };
-    // The toolbar prefers to sit just above whatever it's attached to, but
-    // that only works if there's room — a large image near the top of the
-    // note (right under the fixed header) would push an "always above"
-    // toolbar off-screen or behind the header, making it genuinely
-    // invisible rather than just easy to miss. Below is the fallback.
-    const TOOLBAR_CLEARANCE = 70;
-    const computeToolbarPos = (rect) => {
-        const placement = rect.top < TOOLBAR_CLEARANCE ? "below" : "above";
-        return {
-            top: placement === "above" ? rect.top : rect.bottom,
-            left: rect.left + rect.width / 2,
-            placement,
-        };
+    const handleOutsideClick = e => {
+      const el = selectedImageElRef.current;
+      if (!el) return;
+      if (e.target === el) return; // handled by handleBodyClick
+      if (e.target && e.target.closest && e.target.closest(".rte-floating-toolbar")) return;
+      deselectImage();
     };
-    const selectImage = (el) => {
-        selectedImageElRef.current = el;
-        setImageToolbarPos(computeToolbarPos(el.getBoundingClientRect()));
+    document.addEventListener("scroll", reposition, true);
+    document.addEventListener("click", handleOutsideClick, true);
+    return () => {
+      document.removeEventListener("scroll", reposition, true);
+      document.removeEventListener("click", handleOutsideClick, true);
     };
-    const handleBodyClick = (e) => {
-        if (e.target && e.target.tagName === "IMG" && e.target.classList.contains("rte-inline-image")) {
-            selectImage(e.target);
-        }
-        else if (selectedImageElRef.current) {
-            deselectImage();
-        }
+  }, []);
+  const handleHighlight = variant => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !editorRef.current) return;
+    const range = sel.getRangeAt(0);
+    if (!editorRef.current.contains(range.commonAncestorContainer)) return;
+    const text = sel.toString().trim();
+    if (!text) return;
+    const mark = document.createElement("mark");
+    mark.className = "note-highlight note-highlight-" + variant;
+    try {
+      range.surroundContents(mark);
+    } catch (e) {
+      const frag = range.extractContents();
+      mark.appendChild(frag);
+      range.insertNode(mark);
+    }
+    sel.removeAllRanges();
+    onChange(editorRef.current.innerHTML);
+    if (onHighlight) onHighlight(text);
+  };
+  const handlePaste = e => {
+    const files = imageFilesFromPasteOrDrop(e.clipboardData.items);
+    if (files.length) {
+      e.preventDefault();
+      files.forEach(f => insertImageAtCursor(f));
+      return;
+    }
+
+    // Third case, previously missing entirely: pasted TEXT that is
+    // itself markdown worth rendering (this app's own Copy as
+    // Markdown, or Captura's equivalent) — without this, it fell
+    // through to the browser's default verbatim insert, showing the
+    // raw markdown source (including a base64 image's full text) as
+    // literal characters instead of an actual image.
+    //
+    // preventDefault() happens unconditionally now, for every text
+    // paste, not just ones already confirmed to be markdown — reading
+    // the actual pasted text is now async (see below), and
+    // preventDefault() only has any effect if called synchronously,
+    // before that read resolves, so there's no way to decide "is this
+    // markdown" first and THEN choose whether to prevent the default.
+    e.preventDefault();
+    if (editorRef.current) editorRef.current.focus();
+    const insertPastedText = text => {
+      if (!text) return;
+      if (looksLikeMarkdownWorthParsing(text)) {
+        document.execCommand("insertHTML", false, parsePastedMarkdownToHTML(text));
+      } else {
+        // Plain insertText, not insertHTML — preserves the original
+        // behavior for ordinary pasted text exactly (no formatting
+        // interpreted, just the characters themselves).
+        document.execCommand("insertText", false, text);
+      }
+      if (editorRef.current) onChange(editorRef.current.innerHTML);
     };
-    const resizeSelectedImage = (percent) => {
-        const el = selectedImageElRef.current;
-        if (!el)
-            return;
-        el.style.width = percent + "%";
-        el.style.height = "auto";
-        if (editorRef.current)
-            onChange(editorRef.current.innerHTML);
-        setImageToolbarPos(computeToolbarPos(el.getBoundingClientRect()));
+
+    // The synchronous paste-event clipboardData read used previously
+    // has real, documented inconsistency on mobile browsers
+    // specifically for LARGE text — and a full base64-encoded image
+    // easily runs to tens of thousands of characters. It could return
+    // empty or truncated data with no error at all, silently skipping
+    // this entire code path and falling through to the raw insert —
+    // which is exactly the symptom this exists to fix. The async
+    // Clipboard API is read as the primary source instead, since it's
+    // the more consistently reliable way to read back arbitrary-length
+    // clipboard text; the synchronous read only serves as a fallback
+    // if that either isn't available or is denied permission.
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      navigator.clipboard.readText().then(insertPastedText).catch(() => insertPastedText(e.clipboardData.getData("text/plain")));
+    } else {
+      insertPastedText(e.clipboardData.getData("text/plain"));
+    }
+  };
+  const placeCaretAtPoint = (x, y) => {
+    let range = null;
+    if (document.caretRangeFromPoint) {
+      range = document.caretRangeFromPoint(x, y);
+    } else if (document.caretPositionFromPoint) {
+      const pos = document.caretPositionFromPoint(x, y);
+      if (pos) {
+        range = document.createRange();
+        range.setStart(pos.offsetNode, pos.offset);
+        range.collapse(true);
+      }
+    }
+    if (range) {
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+  };
+  const handleDragOver = e => {
+    e.preventDefault(); // required for onDrop to fire at all
+  };
+  const handleDrop = async e => {
+    e.preventDefault();
+    if (editorRef.current) editorRef.current.focus();
+    placeCaretAtPoint(e.clientX, e.clientY);
+    const files = imageFilesFromPasteOrDrop(e.dataTransfer.items);
+    if (files.length) {
+      for (const f of files) await insertImageAtCursor(f);
+      return;
+    }
+
+    // Dragging an <img> straight off a webpage (rather than a local file)
+    // usually only hands over a URL, not the actual bytes — most sites
+    // don't allow cross-origin fetches of their images, so this will
+    // often fail. When it does, say so plainly instead of doing nothing.
+    const uri = e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text/plain");
+    if (uri && /^https?:\/\//i.test(uri)) {
+      try {
+        const res = await fetch(uri, {
+          mode: "cors"
+        });
+        if (!res.ok) throw new Error("fetch failed");
+        const blob = await res.blob();
+        if (!blob.type.startsWith("image/")) throw new Error("not an image");
+        await insertImageAtCursor(new File([blob], "dropped-image", {
+          type: blob.type
+        }));
+      } catch (err) {
+        if (onImageError) onImageError();
+      }
+    }
+  };
+  const insertImageAtCursor = async file => {
+    if (!file) return;
+    try {
+      const dataUrl = await compressImage(file);
+      if (editorRef.current) editorRef.current.focus();
+      document.execCommand("insertHTML", false, `<img src="${dataUrl}" class="rte-inline-image" alt="" />`);
+      if (editorRef.current) onChange(editorRef.current.innerHTML);
+    } catch (e) {
+      // Same lightweight handling as paste-image elsewhere — a failed
+      // compress/insert just does nothing rather than breaking the editor.
+    }
+  };
+
+  // A small floating toolbar appears near whatever text you've selected, so
+  // formatting doesn't require scrolling back up to the fixed toolbar.
+  useEffect(() => {
+    const updateFromSelection = () => {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || !editorRef.current || sel.rangeCount === 0) {
+        setSelectionToolbar(null);
+        return;
+      }
+      const range = sel.getRangeAt(0);
+      if (!editorRef.current.contains(range.commonAncestorContainer)) {
+        setSelectionToolbar(null);
+        return;
+      }
+      const rect = range.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) {
+        setSelectionToolbar(null);
+        return;
+      }
+      setSelectionToolbar(computeToolbarPos(rect));
+      if (selectedImageElRef.current) deselectImage();
     };
-    const removeSelectedImage = () => {
-        const el = selectedImageElRef.current;
-        if (!el)
-            return;
-        el.remove();
-        if (editorRef.current)
-            onChange(editorRef.current.innerHTML);
-        deselectImage();
+    document.addEventListener("selectionchange", updateFromSelection);
+    document.addEventListener("scroll", updateFromSelection, true);
+    return () => {
+      document.removeEventListener("selectionchange", updateFromSelection);
+      document.removeEventListener("scroll", updateFromSelection, true);
     };
-    const [annotatingImage, setAnnotatingImage] = useState(null); // the <img> DOM element currently being annotated, or null
-    const openAnnotateImage = () => {
-        if (selectedImageElRef.current)
-            setAnnotatingImage(selectedImageElRef.current);
-    };
-    const saveAnnotatedImage = (dataUrl) => {
-        if (annotatingImage) {
-            annotatingImage.src = dataUrl;
-            if (editorRef.current)
-                onChange(editorRef.current.innerHTML);
-        }
-        setAnnotatingImage(null);
-        deselectImage();
-    };
-    // Keeps the image toolbar correctly positioned while scrolling, and
-    // dismisses it on a click anywhere outside the selected image or the
-    // toolbar itself.
-    useEffect(() => {
-        const reposition = () => {
-            const el = selectedImageElRef.current;
-            if (!el || !document.body.contains(el)) {
-                if (el)
-                    deselectImage();
-                return;
-            }
-            setImageToolbarPos(computeToolbarPos(el.getBoundingClientRect()));
-        };
-        const handleOutsideClick = (e) => {
-            const el = selectedImageElRef.current;
-            if (!el)
-                return;
-            if (e.target === el)
-                return; // handled by handleBodyClick
-            if (e.target && e.target.closest && e.target.closest(".rte-floating-toolbar"))
-                return;
-            deselectImage();
-        };
-        document.addEventListener("scroll", reposition, true);
-        document.addEventListener("click", handleOutsideClick, true);
-        return () => {
-            document.removeEventListener("scroll", reposition, true);
-            document.removeEventListener("click", handleOutsideClick, true);
-        };
-    }, []);
-    const handleHighlight = (variant) => {
-        const sel = window.getSelection();
-        if (!sel || sel.isCollapsed || !editorRef.current)
-            return;
-        const range = sel.getRangeAt(0);
-        if (!editorRef.current.contains(range.commonAncestorContainer))
-            return;
-        const text = sel.toString().trim();
-        if (!text)
-            return;
-        const mark = document.createElement("mark");
-        mark.className = "note-highlight note-highlight-" + variant;
-        try {
-            range.surroundContents(mark);
-        }
-        catch (e) {
-            const frag = range.extractContents();
-            mark.appendChild(frag);
-            range.insertNode(mark);
-        }
-        sel.removeAllRanges();
-        onChange(editorRef.current.innerHTML);
-        if (onHighlight)
-            onHighlight(text);
-    };
-    const handlePaste = (e) => {
-        const files = imageFilesFromPasteOrDrop(e.clipboardData.items);
-        if (files.length) {
-            e.preventDefault();
-            files.forEach((f) => insertImageAtCursor(f));
-            return;
-        }
-        // Third case, previously missing entirely: pasted TEXT that is
-        // itself markdown worth rendering (this app's own Copy as
-        // Markdown, or Captura's equivalent) — without this, it fell
-        // through to the browser's default verbatim insert, showing the
-        // raw markdown source (including a base64 image's full text) as
-        // literal characters instead of an actual image.
-        //
-        // preventDefault() happens unconditionally now, for every text
-        // paste, not just ones already confirmed to be markdown — reading
-        // the actual pasted text is now async (see below), and
-        // preventDefault() only has any effect if called synchronously,
-        // before that read resolves, so there's no way to decide "is this
-        // markdown" first and THEN choose whether to prevent the default.
-        e.preventDefault();
-        if (editorRef.current)
-            editorRef.current.focus();
-        const insertPastedText = (text) => {
-            if (!text)
-                return;
-            if (looksLikeMarkdownWorthParsing(text)) {
-                document.execCommand("insertHTML", false, parsePastedMarkdownToHTML(text));
-            }
-            else {
-                // Plain insertText, not insertHTML — preserves the original
-                // behavior for ordinary pasted text exactly (no formatting
-                // interpreted, just the characters themselves).
-                document.execCommand("insertText", false, text);
-            }
-            if (editorRef.current)
-                onChange(editorRef.current.innerHTML);
-        };
-        // The synchronous paste-event clipboardData read used previously
-        // has real, documented inconsistency on mobile browsers
-        // specifically for LARGE text — and a full base64-encoded image
-        // easily runs to tens of thousands of characters. It could return
-        // empty or truncated data with no error at all, silently skipping
-        // this entire code path and falling through to the raw insert —
-        // which is exactly the symptom this exists to fix. The async
-        // Clipboard API is read as the primary source instead, since it's
-        // the more consistently reliable way to read back arbitrary-length
-        // clipboard text; the synchronous read only serves as a fallback
-        // if that either isn't available or is denied permission.
-        if (navigator.clipboard && navigator.clipboard.readText) {
-            navigator.clipboard
-                .readText()
-                .then(insertPastedText)
-                .catch(() => insertPastedText(e.clipboardData.getData("text/plain")));
-        }
-        else {
-            insertPastedText(e.clipboardData.getData("text/plain"));
-        }
-    };
-    const placeCaretAtPoint = (x, y) => {
-        let range = null;
-        if (document.caretRangeFromPoint) {
-            range = document.caretRangeFromPoint(x, y);
-        }
-        else if (document.caretPositionFromPoint) {
-            const pos = document.caretPositionFromPoint(x, y);
-            if (pos) {
-                range = document.createRange();
-                range.setStart(pos.offsetNode, pos.offset);
-                range.collapse(true);
-            }
-        }
-        if (range) {
-            const sel = window.getSelection();
-            sel.removeAllRanges();
-            sel.addRange(range);
-        }
-    };
-    const handleDragOver = (e) => {
-        e.preventDefault(); // required for onDrop to fire at all
-    };
-    const handleDrop = async (e) => {
-        e.preventDefault();
-        if (editorRef.current)
-            editorRef.current.focus();
-        placeCaretAtPoint(e.clientX, e.clientY);
-        const files = imageFilesFromPasteOrDrop(e.dataTransfer.items);
-        if (files.length) {
-            for (const f of files)
-                await insertImageAtCursor(f);
-            return;
-        }
-        // Dragging an <img> straight off a webpage (rather than a local file)
-        // usually only hands over a URL, not the actual bytes — most sites
-        // don't allow cross-origin fetches of their images, so this will
-        // often fail. When it does, say so plainly instead of doing nothing.
-        const uri = e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text/plain");
-        if (uri && /^https?:\/\//i.test(uri)) {
-            try {
-                const res = await fetch(uri, { mode: "cors" });
-                if (!res.ok)
-                    throw new Error("fetch failed");
-                const blob = await res.blob();
-                if (!blob.type.startsWith("image/"))
-                    throw new Error("not an image");
-                await insertImageAtCursor(new File([blob], "dropped-image", { type: blob.type }));
-            }
-            catch (err) {
-                if (onImageError)
-                    onImageError();
-            }
-        }
-    };
-    const insertImageAtCursor = async (file) => {
-        if (!file)
-            return;
-        try {
-            const dataUrl = await compressImage(file);
-            if (editorRef.current)
-                editorRef.current.focus();
-            document.execCommand("insertHTML", false, `<img src="${dataUrl}" class="rte-inline-image" alt="" />`);
-            if (editorRef.current)
-                onChange(editorRef.current.innerHTML);
-        }
-        catch (e) {
-            // Same lightweight handling as paste-image elsewhere — a failed
-            // compress/insert just does nothing rather than breaking the editor.
-        }
-    };
-    // A small floating toolbar appears near whatever text you've selected, so
-    // formatting doesn't require scrolling back up to the fixed toolbar.
-    useEffect(() => {
-        const updateFromSelection = () => {
-            const sel = window.getSelection();
-            if (!sel || sel.isCollapsed || !editorRef.current || sel.rangeCount === 0) {
-                setSelectionToolbar(null);
-                return;
-            }
-            const range = sel.getRangeAt(0);
-            if (!editorRef.current.contains(range.commonAncestorContainer)) {
-                setSelectionToolbar(null);
-                return;
-            }
-            const rect = range.getBoundingClientRect();
-            if (rect.width === 0 && rect.height === 0) {
-                setSelectionToolbar(null);
-                return;
-            }
-            setSelectionToolbar(computeToolbarPos(rect));
-            if (selectedImageElRef.current)
-                deselectImage();
-        };
-        document.addEventListener("selectionchange", updateFromSelection);
-        document.addEventListener("scroll", updateFromSelection, true);
-        return () => {
-            document.removeEventListener("selectionchange", updateFromSelection);
-            document.removeEventListener("scroll", updateFromSelection, true);
-        };
-    }, []);
-    return (React.createElement("div", { className: "rte-wrap" + (tall ? " rte-wrap-tall" : "") },
-        React.createElement("div", { className: "rte-toolbar" },
-            React.createElement("button", { type: "button", title: "Bold", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("bold") },
-                React.createElement("b", null, "B")),
-            React.createElement("button", { type: "button", title: "Italic", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("italic") },
-                React.createElement("i", null, "I")),
-            React.createElement("button", { type: "button", title: "Underline", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("underline") },
-                React.createElement("u", null, "U")),
-            React.createElement("button", { type: "button", title: "Heading", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("formatBlock", "H3") }, "H"),
-            React.createElement("button", { type: "button", title: "Bullet list", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("insertUnorderedList") }, "\u2022\u2014"),
-            React.createElement("button", { type: "button", title: "Numbered list", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("insertOrderedList") }, "1."),
-            React.createElement("button", { type: "button", title: "Plain paragraph", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("formatBlock", "P") }, "\u00B6"),
-            React.createElement("span", { className: "rte-toolbar-divider" }),
-            React.createElement("button", { type: "button", title: "Undo", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("undo") }, "\u21BA"),
-            React.createElement("button", { type: "button", title: "Redo", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("redo") }, "\u21BB"),
-            React.createElement("span", { className: "rte-toolbar-divider" }),
-            React.createElement("label", { className: "rte-toolbar-file-btn", title: "Insert an image right here in the text" },
-                "\uD83D\uDDBC",
-                React.createElement("input", { type: "file", accept: "image/*", className: "visually-hidden-file", onChange: (e) => {
-                        insertImageAtCursor(e.target.files && e.target.files[0]);
-                        e.target.value = "";
-                    } })),
-            onHighlight && (React.createElement(React.Fragment, null,
-                React.createElement("span", { className: "rte-toolbar-divider" }),
-                React.createElement("span", { className: "rte-highlight-group", title: "Select text, then tap a color to highlight it" },
-                    React.createElement("button", { type: "button", className: "rte-highlight-swatch yellow", title: "Highlight \u2014 general", onMouseDown: (e) => e.preventDefault(), onClick: () => handleHighlight("yellow") }),
-                    React.createElement("button", { type: "button", className: "rte-highlight-swatch red", title: "Highlight \u2014 important", onMouseDown: (e) => e.preventDefault(), onClick: () => handleHighlight("red") }),
-                    React.createElement("button", { type: "button", className: "rte-highlight-swatch green", title: "Highlight \u2014 supporting", onMouseDown: (e) => e.preventDefault(), onClick: () => handleHighlight("green") }))))),
-        React.createElement("div", { ref: editorRef, className: "rte-body" + (tall ? " rte-body-tall" : ""), contentEditable: true, suppressContentEditableWarning: true, "data-placeholder": placeholder, dangerouslySetInnerHTML: { __html: initialRef.current }, onInput: (e) => onChange(e.currentTarget.innerHTML), onPaste: handlePaste, onClick: handleBodyClick, onDragOver: handleDragOver, onDrop: handleDrop }),
-        selectionToolbar && (React.createElement("div", { className: "rte-floating-toolbar", style: {
-                top: selectionToolbar.top,
-                left: selectionToolbar.left,
-                transform: selectionToolbar.placement === "below" ? "translate(-50%, 10px)" : "translate(-50%, calc(-100% - 10px))",
-            } },
-            React.createElement("button", { type: "button", title: "Bold", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("bold") },
-                React.createElement("b", null, "B")),
-            React.createElement("button", { type: "button", title: "Italic", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("italic") },
-                React.createElement("i", null, "I")),
-            React.createElement("button", { type: "button", title: "Underline", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("underline") },
-                React.createElement("u", null, "U")),
-            React.createElement("button", { type: "button", title: "Heading", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("formatBlock", "H3") }, "H"),
-            React.createElement("button", { type: "button", title: "Bullet list", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("insertUnorderedList") }, "\u2022\u2014"),
-            React.createElement("button", { type: "button", title: "Numbered list", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("insertOrderedList") }, "1."),
-            React.createElement("button", { type: "button", title: "Plain paragraph", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("formatBlock", "P") }, "\u00B6"),
-            onHighlight && (React.createElement(React.Fragment, null,
-                React.createElement("span", { className: "rte-toolbar-divider" }),
-                React.createElement("button", { type: "button", className: "rte-highlight-swatch yellow", title: "Highlight \u2014 general", onMouseDown: (e) => e.preventDefault(), onClick: () => handleHighlight("yellow") }),
-                React.createElement("button", { type: "button", className: "rte-highlight-swatch red", title: "Highlight \u2014 important", onMouseDown: (e) => e.preventDefault(), onClick: () => handleHighlight("red") }),
-                React.createElement("button", { type: "button", className: "rte-highlight-swatch green", title: "Highlight \u2014 supporting", onMouseDown: (e) => e.preventDefault(), onClick: () => handleHighlight("green") }))),
-            React.createElement("span", { className: "rte-toolbar-divider" }),
-            React.createElement("button", { type: "button", className: "rte-color-swatch", style: { background: "#241C3D" }, title: "Text color \u2014 default", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("foreColor", "#241C3D") }),
-            React.createElement("button", { type: "button", className: "rte-color-swatch", style: { background: "#E5484D" }, title: "Text color \u2014 red", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("foreColor", "#E5484D") }),
-            React.createElement("button", { type: "button", className: "rte-color-swatch", style: { background: "#2F80ED" }, title: "Text color \u2014 blue", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("foreColor", "#2F80ED") }),
-            React.createElement("button", { type: "button", className: "rte-color-swatch", style: { background: "#00A187" }, title: "Text color \u2014 teal", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("foreColor", "#00A187") }),
-            React.createElement("span", { className: "rte-toolbar-divider" }),
-            React.createElement("button", { type: "button", className: "rte-size-btn", title: "Small text", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("fontSize", "2") }, "S"),
-            React.createElement("button", { type: "button", className: "rte-size-btn", title: "Normal text", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("fontSize", "3") }, "M"),
-            React.createElement("button", { type: "button", className: "rte-size-btn", title: "Large text", onMouseDown: (e) => e.preventDefault(), onClick: () => applyCmd("fontSize", "5") }, "L"))),
-        imageToolbarPos && (React.createElement("div", { className: "rte-floating-toolbar", style: {
-                top: imageToolbarPos.top,
-                left: imageToolbarPos.left,
-                transform: imageToolbarPos.placement === "below" ? "translate(-50%, 10px)" : "translate(-50%, calc(-100% - 10px))",
-            } },
-            React.createElement("button", { type: "button", title: "Annotate", onMouseDown: (e) => e.preventDefault(), onClick: openAnnotateImage }, "\u270E"),
-            onOccludeImage && (React.createElement("button", { type: "button", title: "Make occlusion cards from this image", onMouseDown: (e) => e.preventDefault(), onClick: () => {
-                    if (selectedImageElRef.current)
-                        onOccludeImage(selectedImageElRef.current.src);
-                } }, "\u25A7")),
-            React.createElement("span", { className: "rte-toolbar-divider" }),
-            React.createElement("button", { type: "button", title: "Small", onMouseDown: (e) => e.preventDefault(), onClick: () => resizeSelectedImage(25) }, "S"),
-            React.createElement("button", { type: "button", title: "Medium", onMouseDown: (e) => e.preventDefault(), onClick: () => resizeSelectedImage(50) }, "M"),
-            React.createElement("button", { type: "button", title: "Large", onMouseDown: (e) => e.preventDefault(), onClick: () => resizeSelectedImage(75) }, "L"),
-            React.createElement("button", { type: "button", title: "Full width", onMouseDown: (e) => e.preventDefault(), onClick: () => resizeSelectedImage(100) }, "Full"),
-            React.createElement("span", { className: "rte-toolbar-divider" }),
-            React.createElement("button", { type: "button", title: "Remove image", onMouseDown: (e) => e.preventDefault(), onClick: removeSelectedImage }, "\u2715"))),
-        annotatingImage && (React.createElement(DrawingCanvas, { backgroundImageUrl: annotatingImage.src, onCancel: () => setAnnotatingImage(null), onSave: saveAnnotatedImage }))));
+  }, []);
+  return /*#__PURE__*/React.createElement("div", {
+    className: "rte-wrap" + (tall ? " rte-wrap-tall" : "")
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "rte-toolbar"
+  }, /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Bold",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("bold")
+  }, /*#__PURE__*/React.createElement("b", null, "B")), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Italic",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("italic")
+  }, /*#__PURE__*/React.createElement("i", null, "I")), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Underline",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("underline")
+  }, /*#__PURE__*/React.createElement("u", null, "U")), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Heading",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("formatBlock", "H3")
+  }, "H"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Bullet list",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("insertUnorderedList")
+  }, "\u2022\u2014"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Numbered list",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("insertOrderedList")
+  }, "1."), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Plain paragraph",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("formatBlock", "P")
+  }, "\xB6"), /*#__PURE__*/React.createElement("span", {
+    className: "rte-toolbar-divider"
+  }), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Undo",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("undo")
+  }, "\u21BA"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Redo",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("redo")
+  }, "\u21BB"), /*#__PURE__*/React.createElement("span", {
+    className: "rte-toolbar-divider"
+  }), /*#__PURE__*/React.createElement("label", {
+    className: "rte-toolbar-file-btn",
+    title: "Insert an image right here in the text"
+  }, "\uD83D\uDDBC", /*#__PURE__*/React.createElement("input", {
+    type: "file",
+    accept: "image/*",
+    className: "visually-hidden-file",
+    onChange: e => {
+      insertImageAtCursor(e.target.files && e.target.files[0]);
+      e.target.value = "";
+    }
+  })), onHighlight && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
+    className: "rte-toolbar-divider"
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "rte-highlight-group",
+    title: "Select text, then tap a color to highlight it"
+  }, /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "rte-highlight-swatch yellow",
+    title: "Highlight \u2014 general",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => handleHighlight("yellow")
+  }), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "rte-highlight-swatch red",
+    title: "Highlight \u2014 important",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => handleHighlight("red")
+  }), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "rte-highlight-swatch green",
+    title: "Highlight \u2014 supporting",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => handleHighlight("green")
+  })))), /*#__PURE__*/React.createElement("div", {
+    ref: editorRef,
+    className: "rte-body" + (tall ? " rte-body-tall" : ""),
+    contentEditable: true,
+    suppressContentEditableWarning: true,
+    "data-placeholder": placeholder,
+    dangerouslySetInnerHTML: {
+      __html: initialRef.current
+    },
+    onInput: e => onChange(e.currentTarget.innerHTML),
+    onPaste: handlePaste,
+    onClick: handleBodyClick,
+    onDragOver: handleDragOver,
+    onDrop: handleDrop
+  }), selectionToolbar && /*#__PURE__*/React.createElement("div", {
+    className: "rte-floating-toolbar",
+    style: {
+      top: selectionToolbar.top,
+      left: selectionToolbar.left,
+      transform: selectionToolbar.placement === "below" ? "translate(-50%, 10px)" : "translate(-50%, calc(-100% - 10px))"
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Bold",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("bold")
+  }, /*#__PURE__*/React.createElement("b", null, "B")), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Italic",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("italic")
+  }, /*#__PURE__*/React.createElement("i", null, "I")), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Underline",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("underline")
+  }, /*#__PURE__*/React.createElement("u", null, "U")), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Heading",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("formatBlock", "H3")
+  }, "H"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Bullet list",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("insertUnorderedList")
+  }, "\u2022\u2014"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Numbered list",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("insertOrderedList")
+  }, "1."), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Plain paragraph",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("formatBlock", "P")
+  }, "\xB6"), onHighlight && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
+    className: "rte-toolbar-divider"
+  }), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "rte-highlight-swatch yellow",
+    title: "Highlight \u2014 general",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => handleHighlight("yellow")
+  }), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "rte-highlight-swatch red",
+    title: "Highlight \u2014 important",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => handleHighlight("red")
+  }), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "rte-highlight-swatch green",
+    title: "Highlight \u2014 supporting",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => handleHighlight("green")
+  })), /*#__PURE__*/React.createElement("span", {
+    className: "rte-toolbar-divider"
+  }), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "rte-color-swatch",
+    style: {
+      background: "#241C3D"
+    },
+    title: "Text color \u2014 default",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("foreColor", "#241C3D")
+  }), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "rte-color-swatch",
+    style: {
+      background: "#E5484D"
+    },
+    title: "Text color \u2014 red",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("foreColor", "#E5484D")
+  }), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "rte-color-swatch",
+    style: {
+      background: "#2F80ED"
+    },
+    title: "Text color \u2014 blue",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("foreColor", "#2F80ED")
+  }), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "rte-color-swatch",
+    style: {
+      background: "#00A187"
+    },
+    title: "Text color \u2014 teal",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("foreColor", "#00A187")
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "rte-toolbar-divider"
+  }), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "rte-size-btn",
+    title: "Small text",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("fontSize", "2")
+  }, "S"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "rte-size-btn",
+    title: "Normal text",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("fontSize", "3")
+  }, "M"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "rte-size-btn",
+    title: "Large text",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyCmd("fontSize", "5")
+  }, "L")), imageToolbarPos && /*#__PURE__*/React.createElement("div", {
+    className: "rte-floating-toolbar",
+    style: {
+      top: imageToolbarPos.top,
+      left: imageToolbarPos.left,
+      transform: imageToolbarPos.placement === "below" ? "translate(-50%, 10px)" : "translate(-50%, calc(-100% - 10px))"
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Annotate",
+    onMouseDown: e => e.preventDefault(),
+    onClick: openAnnotateImage
+  }, "\u270E"), onOccludeImage && /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Make occlusion cards from this image",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => {
+      if (selectedImageElRef.current) onOccludeImage(selectedImageElRef.current.src);
+    }
+  }, "\u25A7"), /*#__PURE__*/React.createElement("span", {
+    className: "rte-toolbar-divider"
+  }), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Small",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => resizeSelectedImage(25)
+  }, "S"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Medium",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => resizeSelectedImage(50)
+  }, "M"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Large",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => resizeSelectedImage(75)
+  }, "L"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Full width",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => resizeSelectedImage(100)
+  }, "Full"), /*#__PURE__*/React.createElement("span", {
+    className: "rte-toolbar-divider"
+  }), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Remove image",
+    onMouseDown: e => e.preventDefault(),
+    onClick: removeSelectedImage
+  }, "\u2715")), annotatingImage && /*#__PURE__*/React.createElement(DrawingCanvas, {
+    backgroundImageUrl: annotatingImage.src,
+    onCancel: () => setAnnotatingImage(null),
+    onSave: saveAnnotatedImage
+  }));
 }
+
 // ---------- Drawing canvas (S Pen / touch / mouse) ----------
-function DrawingCanvas({ onCancel, onSave, backgroundImageUrl }) {
-    const canvasRef = useRef(null);
-    const drawingRef = useRef(false);
-    const lastPointRef = useRef(null);
-    const shapeStartRef = useRef(null); // {x,y} | null — start point while dragging a shape
-    const shapeSnapshotRef = useRef(null); // ImageData taken right before a shape drag starts
-    const [color, setColor] = useState("#241C3D");
-    const [tool, setTool] = useState("pen"); // "pen" | "eraser" | "rect" | "ellipse" | "line" | "arrow" | "lasso"
-    const [hasInk, setHasInk] = useState(!!backgroundImageUrl);
-    const [bgLoaded, setBgLoaded] = useState(!backgroundImageUrl);
-    const DRAW_COLORS = ["#241C3D", "#6C5CE7", "#FF4D8D", "#00B39F", "#F5A623"];
-    const SHAPE_TOOLS = ["rect", "ellipse", "line", "arrow"];
-    // Lasso select+resize state — see the note above LassoOverlay for the
-    // honest caveat on this specific tool.
-    const [lassoPath, setLassoPath] = useState(null); // array of {x,y} while actively lassoing
-    const [selection, setSelection] = useState(null); // { x, y, w, h, dataUrl } | null — the floating, resizable piece
-    const drawBackground = (ctx, rect, onComplete) => {
-        ctx.fillStyle = "#FFFFFF";
-        ctx.fillRect(0, 0, rect.width, rect.height);
-        if (backgroundImageUrl) {
-            const img = new Image();
-            img.onload = () => {
-                // "Contain" fit — the whole image visible, letterboxed if its
-                // aspect ratio doesn't match the canvas, never cropped or
-                // stretched out of shape.
-                const scale = Math.min(rect.width / img.width, rect.height / img.height);
-                const drawW = img.width * scale;
-                const drawH = img.height * scale;
-                const dx = (rect.width - drawW) / 2;
-                const dy = (rect.height - drawH) / 2;
-                ctx.drawImage(img, dx, dy, drawW, drawH);
-                if (onComplete)
-                    onComplete();
-            };
-            img.onerror = () => { if (onComplete)
-                onComplete(); }; // fall through to a blank canvas rather than get stuck
-            img.src = backgroundImageUrl;
-        }
-        else if (onComplete) {
-            onComplete();
-        }
+
+function DrawingCanvas({
+  onCancel,
+  onSave,
+  backgroundImageUrl
+}) {
+  const canvasRef = useRef(null);
+  const drawingRef = useRef(false);
+  const lastPointRef = useRef(null);
+  const shapeStartRef = useRef(null); // {x,y} | null — start point while dragging a shape
+  const shapeSnapshotRef = useRef(null); // ImageData taken right before a shape drag starts
+  const [color, setColor] = useState("#241C3D");
+  const [tool, setTool] = useState("pen"); // "pen" | "eraser" | "rect" | "ellipse" | "line" | "arrow" | "lasso"
+  const [hasInk, setHasInk] = useState(!!backgroundImageUrl);
+  const [bgLoaded, setBgLoaded] = useState(!backgroundImageUrl);
+  const DRAW_COLORS = ["#241C3D", "#6C5CE7", "#FF4D8D", "#00B39F", "#F5A623"];
+  const SHAPE_TOOLS = ["rect", "ellipse", "line", "arrow"];
+
+  // Lasso select+resize state — see the note above LassoOverlay for the
+  // honest caveat on this specific tool.
+  const [lassoPath, setLassoPath] = useState(null); // array of {x,y} while actively lassoing
+  const [selection, setSelection] = useState(null); // { x, y, w, h, dataUrl } | null — the floating, resizable piece
+
+  const drawBackground = (ctx, rect, onComplete) => {
+    ctx.fillStyle = "#FFFFFF";
+    ctx.fillRect(0, 0, rect.width, rect.height);
+    if (backgroundImageUrl) {
+      const img = new Image();
+      img.onload = () => {
+        // "Contain" fit — the whole image visible, letterboxed if its
+        // aspect ratio doesn't match the canvas, never cropped or
+        // stretched out of shape.
+        const scale = Math.min(rect.width / img.width, rect.height / img.height);
+        const drawW = img.width * scale;
+        const drawH = img.height * scale;
+        const dx = (rect.width - drawW) / 2;
+        const dy = (rect.height - drawH) / 2;
+        ctx.drawImage(img, dx, dy, drawW, drawH);
+        if (onComplete) onComplete();
+      };
+      img.onerror = () => {
+        if (onComplete) onComplete();
+      }; // fall through to a blank canvas rather than get stuck
+      img.src = backgroundImageUrl;
+    } else if (onComplete) {
+      onComplete();
+    }
+  };
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ratio = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * ratio;
+    canvas.height = rect.height * ratio;
+    const ctx = canvas.getContext("2d");
+    ctx.scale(ratio, ratio);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    drawBackground(ctx, rect, () => setBgLoaded(true));
+  }, []);
+  const getPoint = e => {
+    const rect = canvasRef.current.getBoundingClientRect();
+    const pressure = typeof e.pressure === "number" && e.pressure > 0 ? e.pressure : 0.5;
+    return {
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+      pressure
     };
-    useEffect(() => {
-        const canvas = canvasRef.current;
-        if (!canvas)
-            return;
-        const ratio = window.devicePixelRatio || 1;
-        const rect = canvas.getBoundingClientRect();
-        canvas.width = rect.width * ratio;
-        canvas.height = rect.height * ratio;
-        const ctx = canvas.getContext("2d");
-        ctx.scale(ratio, ratio);
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
-        drawBackground(ctx, rect, () => setBgLoaded(true));
-    }, []);
-    const getPoint = (e) => {
-        const rect = canvasRef.current.getBoundingClientRect();
-        const pressure = typeof e.pressure === "number" && e.pressure > 0 ? e.pressure : 0.5;
-        return { x: e.clientX - rect.left, y: e.clientY - rect.top, pressure };
-    };
-    const drawShape = (ctx, shapeTool, start, end) => {
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 3;
+  };
+  const drawShape = (ctx, shapeTool, start, end) => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    if (shapeTool === "rect") {
+      ctx.strokeRect(Math.min(start.x, end.x), Math.min(start.y, end.y), Math.abs(end.x - start.x), Math.abs(end.y - start.y));
+    } else if (shapeTool === "ellipse") {
+      const cx = (start.x + end.x) / 2;
+      const cy = (start.y + end.y) / 2;
+      const rx = Math.abs(end.x - start.x) / 2;
+      const ry = Math.abs(end.y - start.y) / 2;
+      ctx.ellipse(cx, cy, Math.max(rx, 0.01), Math.max(ry, 0.01), 0, 0, Math.PI * 2);
+      ctx.stroke();
+    } else if (shapeTool === "line" || shapeTool === "arrow") {
+      ctx.moveTo(start.x, start.y);
+      ctx.lineTo(end.x, end.y);
+      ctx.stroke();
+      if (shapeTool === "arrow") {
+        const angle = Math.atan2(end.y - start.y, end.x - start.x);
+        const headLen = 12;
         ctx.beginPath();
-        if (shapeTool === "rect") {
-            ctx.strokeRect(Math.min(start.x, end.x), Math.min(start.y, end.y), Math.abs(end.x - start.x), Math.abs(end.y - start.y));
-        }
-        else if (shapeTool === "ellipse") {
-            const cx = (start.x + end.x) / 2;
-            const cy = (start.y + end.y) / 2;
-            const rx = Math.abs(end.x - start.x) / 2;
-            const ry = Math.abs(end.y - start.y) / 2;
-            ctx.ellipse(cx, cy, Math.max(rx, 0.01), Math.max(ry, 0.01), 0, 0, Math.PI * 2);
-            ctx.stroke();
-        }
-        else if (shapeTool === "line" || shapeTool === "arrow") {
-            ctx.moveTo(start.x, start.y);
-            ctx.lineTo(end.x, end.y);
-            ctx.stroke();
-            if (shapeTool === "arrow") {
-                const angle = Math.atan2(end.y - start.y, end.x - start.x);
-                const headLen = 12;
-                ctx.beginPath();
-                ctx.moveTo(end.x, end.y);
-                ctx.lineTo(end.x - headLen * Math.cos(angle - Math.PI / 6), end.y - headLen * Math.sin(angle - Math.PI / 6));
-                ctx.moveTo(end.x, end.y);
-                ctx.lineTo(end.x - headLen * Math.cos(angle + Math.PI / 6), end.y - headLen * Math.sin(angle + Math.PI / 6));
-                ctx.stroke();
-            }
-        }
-    };
-    const historyRef = useRef([]); // stack of dataURL snapshots, oldest first — capped to bound memory
-    const MAX_HISTORY = 8;
-    const [canUndo, setCanUndo] = useState(false);
-    // Snapshots as compressed PNG dataURLs rather than raw ImageData — a
-    // full-resolution ImageData snapshot on a high-DPI phone screen can run
-    // tens of MB each; a handful of those would risk exhausting memory on
-    // the very device this needs to work reliably on.
-    const pushHistory = () => {
-        const canvas = canvasRef.current;
-        if (!canvas)
-            return;
-        historyRef.current.push(canvas.toDataURL("image/png"));
-        if (historyRef.current.length > MAX_HISTORY)
-            historyRef.current.shift();
-        setCanUndo(true);
-    };
-    const undo = () => {
-        if (!historyRef.current.length)
-            return;
-        const canvas = canvasRef.current;
-        const ctx = canvas.getContext("2d");
-        const rect = canvas.getBoundingClientRect();
-        const prevDataUrl = historyRef.current.pop();
-        const img = new Image();
-        img.onload = () => {
-            ctx.clearRect(0, 0, rect.width, rect.height);
-            ctx.drawImage(img, 0, 0, rect.width, rect.height);
-            setCanUndo(historyRef.current.length > 0);
-            if (historyRef.current.length === 0)
-                setHasInk(!!backgroundImageUrl);
-        };
-        img.src = prevDataUrl;
-    };
-    const startDraw = (e) => {
-        e.preventDefault();
-        pushHistory();
-        const p = getPoint(e);
-        if (SHAPE_TOOLS.includes(tool)) {
-            const canvas = canvasRef.current;
-            const ctx = canvas.getContext("2d");
-            shapeSnapshotRef.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
-            shapeStartRef.current = p;
-        }
-        else if (tool === "lasso") {
-            setLassoPath([p]);
-        }
-        else {
-            drawingRef.current = true;
-            lastPointRef.current = p;
-        }
-        setHasInk(true);
-    };
-    const moveDraw = (e) => {
-        const canvas = canvasRef.current;
-        const ctx = canvas.getContext("2d");
-        if (SHAPE_TOOLS.includes(tool) && shapeStartRef.current) {
-            e.preventDefault();
-            const p = getPoint(e);
-            ctx.putImageData(shapeSnapshotRef.current, 0, 0);
-            drawShape(ctx, tool, shapeStartRef.current, p);
-            return;
-        }
-        if (tool === "lasso" && lassoPath) {
-            e.preventDefault();
-            const p = getPoint(e);
-            setLassoPath((cur) => [...cur, p]);
-            return;
-        }
-        if (!drawingRef.current)
-            return;
-        e.preventDefault();
-        const p = getPoint(e);
-        const last = lastPointRef.current;
-        ctx.strokeStyle = tool === "eraser" ? "#FFFFFF" : color;
-        ctx.lineWidth = tool === "eraser" ? 18 : Math.max(1.5, p.pressure * 6);
-        ctx.beginPath();
-        ctx.moveTo(last.x, last.y);
-        ctx.lineTo(p.x, p.y);
+        ctx.moveTo(end.x, end.y);
+        ctx.lineTo(end.x - headLen * Math.cos(angle - Math.PI / 6), end.y - headLen * Math.sin(angle - Math.PI / 6));
+        ctx.moveTo(end.x, end.y);
+        ctx.lineTo(end.x - headLen * Math.cos(angle + Math.PI / 6), end.y - headLen * Math.sin(angle + Math.PI / 6));
         ctx.stroke();
-        lastPointRef.current = p;
+      }
+    }
+  };
+  const historyRef = useRef([]); // stack of dataURL snapshots, oldest first — capped to bound memory
+  const MAX_HISTORY = 8;
+  const [canUndo, setCanUndo] = useState(false);
+
+  // Snapshots as compressed PNG dataURLs rather than raw ImageData — a
+  // full-resolution ImageData snapshot on a high-DPI phone screen can run
+  // tens of MB each; a handful of those would risk exhausting memory on
+  // the very device this needs to work reliably on.
+  const pushHistory = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    historyRef.current.push(canvas.toDataURL("image/png"));
+    if (historyRef.current.length > MAX_HISTORY) historyRef.current.shift();
+    setCanUndo(true);
+  };
+  const undo = () => {
+    if (!historyRef.current.length) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    const rect = canvas.getBoundingClientRect();
+    const prevDataUrl = historyRef.current.pop();
+    const img = new Image();
+    img.onload = () => {
+      ctx.clearRect(0, 0, rect.width, rect.height);
+      ctx.drawImage(img, 0, 0, rect.width, rect.height);
+      setCanUndo(historyRef.current.length > 0);
+      if (historyRef.current.length === 0) setHasInk(!!backgroundImageUrl);
     };
-    const endDraw = () => {
-        if (SHAPE_TOOLS.includes(tool)) {
-            shapeStartRef.current = null;
-            shapeSnapshotRef.current = null;
-            return;
-        }
-        if (tool === "lasso" && lassoPath && lassoPath.length > 2) {
-            commitLassoSelection(lassoPath);
-            setLassoPath(null);
-            return;
-        }
-        setLassoPath(null);
-        drawingRef.current = false;
+    img.src = prevDataUrl;
+  };
+  const startDraw = e => {
+    e.preventDefault();
+    pushHistory();
+    const p = getPoint(e);
+    if (SHAPE_TOOLS.includes(tool)) {
+      const canvas = canvasRef.current;
+      const ctx = canvas.getContext("2d");
+      shapeSnapshotRef.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      shapeStartRef.current = p;
+    } else if (tool === "lasso") {
+      setLassoPath([p]);
+    } else {
+      drawingRef.current = true;
+      lastPointRef.current = p;
+    }
+    setHasInk(true);
+  };
+  const moveDraw = e => {
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    if (SHAPE_TOOLS.includes(tool) && shapeStartRef.current) {
+      e.preventDefault();
+      const p = getPoint(e);
+      ctx.putImageData(shapeSnapshotRef.current, 0, 0);
+      drawShape(ctx, tool, shapeStartRef.current, p);
+      return;
+    }
+    if (tool === "lasso" && lassoPath) {
+      e.preventDefault();
+      const p = getPoint(e);
+      setLassoPath(cur => [...cur, p]);
+      return;
+    }
+    if (!drawingRef.current) return;
+    e.preventDefault();
+    strokeTo(ctx, getPoint(e));
+  };
+  const strokeTo = (ctx, p) => {
+    const last = lastPointRef.current;
+    ctx.strokeStyle = tool === "eraser" ? "#FFFFFF" : color;
+    ctx.lineWidth = tool === "eraser" ? 18 : Math.max(1.5, p.pressure * 6);
+    ctx.beginPath();
+    ctx.moveTo(last.x, last.y);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+    lastPointRef.current = p;
+  };
+
+  // Finishes at the point where the finger actually lifted. On a phone the last pointermove
+  // often lands well short of that (moves are batched per frame, the lift carries the final
+  // position), so strokes and shapes used to end visibly short of where you drew them.
+  const endDraw = e => {
+    const p = e && typeof e.clientX === "number" && canvasRef.current ? getPoint(e) : null;
+    if (SHAPE_TOOLS.includes(tool)) {
+      if (p && shapeStartRef.current && shapeSnapshotRef.current) {
+        const ctx = canvasRef.current.getContext("2d");
+        ctx.putImageData(shapeSnapshotRef.current, 0, 0);
+        drawShape(ctx, tool, shapeStartRef.current, p);
+      }
+      shapeStartRef.current = null;
+      shapeSnapshotRef.current = null;
+      return;
+    }
+    if (tool === "lasso" && lassoPath && lassoPath.length > 2) {
+      commitLassoSelection(p ? [...lassoPath, p] : lassoPath);
+      setLassoPath(null);
+      return;
+    }
+    setLassoPath(null);
+    // Pressure reads 0 on lift, so keep the stroke's own pressure for this last segment.
+    if (drawingRef.current && p) strokeTo(canvasRef.current.getContext("2d"), {
+      ...p,
+      pressure: lastPointRef.current.pressure
+    });
+    drawingRef.current = false;
+  };
+
+  // Extracts everything inside the closed lasso loop onto its own floating,
+  // draggable, resizable piece — and erases that region from the base
+  // drawing so it isn't shown twice. Dragging the corner handle scales it;
+  // tapping "Done" bakes it back onto the canvas at wherever it ended up.
+  const commitLassoSelection = path => {
+    const canvas = canvasRef.current;
+    const ratio = window.devicePixelRatio || 1;
+    const xs = path.map(p => p.x);
+    const ys = path.map(p => p.y);
+    const minX = Math.max(0, Math.min(...xs));
+    const minY = Math.max(0, Math.min(...ys));
+    const maxX = Math.min(canvas.width / ratio, Math.max(...xs));
+    const maxY = Math.min(canvas.height / ratio, Math.max(...ys));
+    const w = maxX - minX;
+    const h = maxY - minY;
+    if (w < 4 || h < 4) return; // ignore an accidental tap/tiny loop
+
+    // Extract just the lassoed region onto its own small canvas, masked to
+    // the exact loop shape (not just its rectangular bounding box).
+    const cut = document.createElement("canvas");
+    cut.width = w * ratio;
+    cut.height = h * ratio;
+    const cutCtx = cut.getContext("2d");
+    cutCtx.scale(ratio, ratio);
+    cutCtx.save();
+    cutCtx.beginPath();
+    path.forEach((p, i) => {
+      const x = p.x - minX;
+      const y = p.y - minY;
+      if (i === 0) cutCtx.moveTo(x, y);else cutCtx.lineTo(x, y);
+    });
+    cutCtx.closePath();
+    cutCtx.clip();
+    cutCtx.drawImage(canvas, -minX, -minY, canvas.width / ratio, canvas.height / ratio);
+    cutCtx.restore();
+
+    // Erase the same masked region from the base drawing so it doesn't
+    // appear both there AND in the floating selection.
+    const mainCtx = canvas.getContext("2d");
+    mainCtx.save();
+    mainCtx.beginPath();
+    path.forEach((p, i) => {
+      if (i === 0) mainCtx.moveTo(p.x, p.y);else mainCtx.lineTo(p.x, p.y);
+    });
+    mainCtx.closePath();
+    mainCtx.clip();
+    mainCtx.fillStyle = "#FFFFFF";
+    mainCtx.fillRect(minX, minY, w, h);
+    mainCtx.restore();
+    setSelection({
+      x: minX,
+      y: minY,
+      w,
+      h,
+      dataUrl: cut.toDataURL("image/png")
+    });
+  };
+  const commitSelectionToCanvas = () => {
+    if (!selection) return;
+    pushHistory();
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    const img = new Image();
+    img.onload = () => {
+      ctx.drawImage(img, selection.x, selection.y, selection.w, selection.h);
+      setSelection(null);
     };
-    // Extracts everything inside the closed lasso loop onto its own floating,
-    // draggable, resizable piece — and erases that region from the base
-    // drawing so it isn't shown twice. Dragging the corner handle scales it;
-    // tapping "Done" bakes it back onto the canvas at wherever it ended up.
-    const commitLassoSelection = (path) => {
-        const canvas = canvasRef.current;
-        const ratio = window.devicePixelRatio || 1;
-        const xs = path.map((p) => p.x);
-        const ys = path.map((p) => p.y);
-        const minX = Math.max(0, Math.min(...xs));
-        const minY = Math.max(0, Math.min(...ys));
-        const maxX = Math.min(canvas.width / ratio, Math.max(...xs));
-        const maxY = Math.min(canvas.height / ratio, Math.max(...ys));
-        const w = maxX - minX;
-        const h = maxY - minY;
-        if (w < 4 || h < 4)
-            return; // ignore an accidental tap/tiny loop
-        // Extract just the lassoed region onto its own small canvas, masked to
-        // the exact loop shape (not just its rectangular bounding box).
-        const cut = document.createElement("canvas");
-        cut.width = w * ratio;
-        cut.height = h * ratio;
-        const cutCtx = cut.getContext("2d");
-        cutCtx.scale(ratio, ratio);
-        cutCtx.save();
-        cutCtx.beginPath();
-        path.forEach((p, i) => {
-            const x = p.x - minX;
-            const y = p.y - minY;
-            if (i === 0)
-                cutCtx.moveTo(x, y);
-            else
-                cutCtx.lineTo(x, y);
-        });
-        cutCtx.closePath();
-        cutCtx.clip();
-        cutCtx.drawImage(canvas, -minX, -minY, canvas.width / ratio, canvas.height / ratio);
-        cutCtx.restore();
-        // Erase the same masked region from the base drawing so it doesn't
-        // appear both there AND in the floating selection.
-        const mainCtx = canvas.getContext("2d");
-        mainCtx.save();
-        mainCtx.beginPath();
-        path.forEach((p, i) => {
-            if (i === 0)
-                mainCtx.moveTo(p.x, p.y);
-            else
-                mainCtx.lineTo(p.x, p.y);
-        });
-        mainCtx.closePath();
-        mainCtx.clip();
-        mainCtx.fillStyle = "#FFFFFF";
-        mainCtx.fillRect(minX, minY, w, h);
-        mainCtx.restore();
-        setSelection({ x: minX, y: minY, w, h, dataUrl: cut.toDataURL("image/png") });
-    };
-    const commitSelectionToCanvas = () => {
-        if (!selection)
-            return;
-        pushHistory();
-        const canvas = canvasRef.current;
-        const ctx = canvas.getContext("2d");
-        const img = new Image();
-        img.onload = () => {
-            ctx.drawImage(img, selection.x, selection.y, selection.w, selection.h);
-            setSelection(null);
-        };
-        img.src = selection.dataUrl;
-    };
-    const clearCanvas = () => {
-        const canvas = canvasRef.current;
-        const ctx = canvas.getContext("2d");
-        const rect = canvas.getBoundingClientRect();
-        pushHistory();
-        setSelection(null);
-        // Clearing restores the original image (if annotating one) rather than
-        // wiping to a blank canvas — "clear" here means "undo my markup," not
-        // "throw away the photo." And since Clear is itself now a step in the
-        // undo history, an accidental tap is recoverable too.
-        drawBackground(ctx, rect, () => setHasInk(!!backgroundImageUrl));
-    };
-    const handleSave = () => {
-        if (selection)
-            commitSelectionToCanvas();
-        if (!hasInk) {
-            onCancel();
-            return;
-        }
-        // Give the (rare) async commit a tick to land before reading the canvas out.
-        setTimeout(() => {
-            const dataUrl = canvasRef.current.toDataURL("image/png");
-            onSave(dataUrl);
-        }, 0);
-    };
-    return (React.createElement("div", { className: "modal-backdrop", onClick: onCancel },
-        React.createElement("div", { className: "modal wide", onClick: (e) => e.stopPropagation() },
-            React.createElement("div", { className: "modal-header" },
-                React.createElement("span", { className: "eyebrow" }, backgroundImageUrl ? "Annotate image" : "Draw / handwrite"),
-                React.createElement("button", { className: "modal-close", onClick: onCancel }, "\u2715")),
-            React.createElement("p", { className: "modal-copy" }, backgroundImageUrl
-                ? "Mark up the image below — same pen and tools as free drawing. \"Clear\" undoes your markup, not the photo."
-                : "Works with your finger, mouse, or S Pen — pressure-sensitive on supported devices."),
-            React.createElement("div", { className: "draw-canvas-wrap" },
-                React.createElement("canvas", { ref: canvasRef, className: "draw-canvas", onPointerDown: bgLoaded ? startDraw : undefined, onPointerMove: bgLoaded ? moveDraw : undefined, onPointerUp: bgLoaded ? endDraw : undefined, onPointerLeave: bgLoaded ? endDraw : undefined, style: { touchAction: "none" } }),
-                !bgLoaded && (React.createElement("div", { className: "draw-canvas-loading" }, "Loading image\u2026")),
-                lassoPath && lassoPath.length > 1 && (React.createElement("svg", { className: "lasso-preview-svg" },
-                    React.createElement("polyline", { points: lassoPath.map((p) => `${p.x},${p.y}`).join(" ") }))),
-                selection && (React.createElement(SelectionOverlay, { selection: selection, onChange: setSelection, onCommit: commitSelectionToCanvas }))),
-            React.createElement("div", { className: "draw-toolbar" },
-                React.createElement("div", { className: "draw-tool-row" },
-                    React.createElement("button", { className: "btn-ghost small" + (tool === "pen" ? " active-toggle" : ""), onClick: () => setTool("pen"), title: "Pen" }, "\u270E"),
-                    React.createElement("button", { className: "btn-ghost small" + (tool === "eraser" ? " active-toggle" : ""), onClick: () => setTool("eraser"), title: "Eraser" }, "\u232B"),
-                    React.createElement("span", { className: "rte-toolbar-divider" }),
-                    React.createElement("button", { className: "btn-ghost small" + (tool === "rect" ? " active-toggle" : ""), onClick: () => setTool("rect"), title: "Rectangle" }, "\u25AD"),
-                    React.createElement("button", { className: "btn-ghost small" + (tool === "ellipse" ? " active-toggle" : ""), onClick: () => setTool("ellipse"), title: "Ellipse" }, "\u25EF"),
-                    React.createElement("button", { className: "btn-ghost small" + (tool === "line" ? " active-toggle" : ""), onClick: () => setTool("line"), title: "Line" }, "\u2571"),
-                    React.createElement("button", { className: "btn-ghost small" + (tool === "arrow" ? " active-toggle" : ""), onClick: () => setTool("arrow"), title: "Arrow" }, "\u2197"),
-                    React.createElement("span", { className: "rte-toolbar-divider" }),
-                    React.createElement("button", { className: "btn-ghost small" + (tool === "lasso" ? " active-toggle" : ""), onClick: () => setTool("lasso"), title: "Lasso select \u2014 draw a loop around ink to move or resize it" }, "\u25CC")),
-                React.createElement("div", { className: "color-dot-row" }, DRAW_COLORS.map((c) => (React.createElement("button", { key: c, className: "color-dot" + (tool !== "eraser" && color === c ? " selected" : ""), style: { background: c }, onClick: () => {
-                        setColor(c);
-                        if (tool === "eraser")
-                            setTool("pen");
-                    } })))),
-                selection && (React.createElement("button", { className: "btn-ghost small", onClick: commitSelectionToCanvas }, "Done resizing")),
-                React.createElement("button", { className: "btn-ghost small", onClick: undo, disabled: !bgLoaded || !canUndo, title: "Undo the last stroke" }, "\u21BA Undo"),
-                React.createElement("button", { className: "btn-ghost small", onClick: clearCanvas, disabled: !bgLoaded }, "Clear")),
-            React.createElement("div", { className: "modal-actions" },
-                React.createElement("button", { className: "btn-ghost", onClick: onCancel }, "Cancel"),
-                React.createElement("button", { className: "btn-primary", onClick: handleSave, disabled: !bgLoaded }, backgroundImageUrl ? "Save annotation" : "Add to note")))));
+    img.src = selection.dataUrl;
+  };
+  const clearCanvas = () => {
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    const rect = canvas.getBoundingClientRect();
+    pushHistory();
+    setSelection(null);
+    // Clearing restores the original image (if annotating one) rather than
+    // wiping to a blank canvas — "clear" here means "undo my markup," not
+    // "throw away the photo." And since Clear is itself now a step in the
+    // undo history, an accidental tap is recoverable too.
+    drawBackground(ctx, rect, () => setHasInk(!!backgroundImageUrl));
+  };
+  const handleSave = () => {
+    if (selection) commitSelectionToCanvas();
+    if (!hasInk) {
+      onCancel();
+      return;
+    }
+    // Give the (rare) async commit a tick to land before reading the canvas out.
+    setTimeout(() => {
+      // An annotated photo as PNG came out ~9x the size of the original JPEG (measured: 16 KB
+      // -> 149 KB), and every occlusion card made from it stores two more copies. JPEG keeps
+      // annotated photos compact; plain drawings stay PNG so handwriting stays crisp.
+      const dataUrl = backgroundImageUrl ? canvasRef.current.toDataURL("image/jpeg", 0.85) : canvasRef.current.toDataURL("image/png");
+      onSave(dataUrl);
+    }, 0);
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    className: "modal-backdrop",
+    onClick: onCancel
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal wide",
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal-header"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "eyebrow"
+  }, backgroundImageUrl ? "Annotate image" : "Draw / handwrite"), /*#__PURE__*/React.createElement("button", {
+    className: "modal-close",
+    onClick: onCancel
+  }, "\u2715")), /*#__PURE__*/React.createElement("p", {
+    className: "modal-copy"
+  }, backgroundImageUrl ? "Mark up the image below — same pen and tools as free drawing. \"Clear\" undoes your markup, not the photo." : "Works with your finger, mouse, or S Pen — pressure-sensitive on supported devices."), /*#__PURE__*/React.createElement("div", {
+    className: "draw-canvas-wrap"
+  }, /*#__PURE__*/React.createElement("canvas", {
+    ref: canvasRef,
+    className: "draw-canvas",
+    onPointerDown: bgLoaded ? startDraw : undefined,
+    onPointerMove: bgLoaded ? moveDraw : undefined,
+    onPointerUp: bgLoaded ? endDraw : undefined,
+    onPointerLeave: bgLoaded ? endDraw : undefined,
+    onPointerCancel: bgLoaded ? () => endDraw() : undefined,
+    style: {
+      touchAction: "none"
+    }
+  }), !bgLoaded && /*#__PURE__*/React.createElement("div", {
+    className: "draw-canvas-loading"
+  }, "Loading image\u2026"), lassoPath && lassoPath.length > 1 && /*#__PURE__*/React.createElement("svg", {
+    className: "lasso-preview-svg"
+  }, /*#__PURE__*/React.createElement("polyline", {
+    points: lassoPath.map(p => `${p.x},${p.y}`).join(" ")
+  })), selection && /*#__PURE__*/React.createElement(SelectionOverlay, {
+    selection: selection,
+    onChange: setSelection,
+    onCommit: commitSelectionToCanvas
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "draw-toolbar"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "draw-tool-row"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small" + (tool === "pen" ? " active-toggle" : ""),
+    onClick: () => setTool("pen"),
+    title: "Pen"
+  }, "\u270E"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small" + (tool === "eraser" ? " active-toggle" : ""),
+    onClick: () => setTool("eraser"),
+    title: "Eraser"
+  }, "\u232B"), /*#__PURE__*/React.createElement("span", {
+    className: "rte-toolbar-divider"
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small" + (tool === "rect" ? " active-toggle" : ""),
+    onClick: () => setTool("rect"),
+    title: "Rectangle"
+  }, "\u25AD"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small" + (tool === "ellipse" ? " active-toggle" : ""),
+    onClick: () => setTool("ellipse"),
+    title: "Ellipse"
+  }, "\u25EF"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small" + (tool === "line" ? " active-toggle" : ""),
+    onClick: () => setTool("line"),
+    title: "Line"
+  }, "\u2571"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small" + (tool === "arrow" ? " active-toggle" : ""),
+    onClick: () => setTool("arrow"),
+    title: "Arrow"
+  }, "\u2197"), /*#__PURE__*/React.createElement("span", {
+    className: "rte-toolbar-divider"
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small" + (tool === "lasso" ? " active-toggle" : ""),
+    onClick: () => setTool("lasso"),
+    title: "Lasso select \u2014 draw a loop around ink to move or resize it"
+  }, "\u25CC")), /*#__PURE__*/React.createElement("div", {
+    className: "color-dot-row"
+  }, DRAW_COLORS.map(c => /*#__PURE__*/React.createElement("button", {
+    key: c,
+    className: "color-dot" + (tool !== "eraser" && color === c ? " selected" : ""),
+    style: {
+      background: c
+    },
+    onClick: () => {
+      setColor(c);
+      if (tool === "eraser") setTool("pen");
+    }
+  }))), selection && /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small",
+    onClick: commitSelectionToCanvas
+  }, "Done resizing"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small",
+    onClick: undo,
+    disabled: !bgLoaded || !canUndo,
+    title: "Undo the last stroke"
+  }, "\u21BA Undo"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small",
+    onClick: clearCanvas,
+    disabled: !bgLoaded
+  }, "Clear")), /*#__PURE__*/React.createElement("div", {
+    className: "modal-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost",
+    onClick: onCancel
+  }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    onClick: handleSave,
+    disabled: !bgLoaded
+  }, backgroundImageUrl ? "Save annotation" : "Add to note"))));
 }
+
 // The lasso-select-and-resize piece above is the least testable part of
 // this whole app — it depends entirely on real pointer-drag feel (finger,
 // mouse, or S Pen) that can't be simulated here. Everything else in this
 // file has been verified through rendering and logic tests; this overlay's
 // actual on-screen feel has not, and is the one thing most worth trying
 // directly (e.g. in the live Claude-artifact preview) before trusting it.
-function SelectionOverlay({ selection, onChange, onCommit }) {
-    const dragRef = useRef(null); // { mode: "move"|"resize", startX, startY, orig } | null
-    const onPointerDownMove = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        dragRef.current = { mode: "move", startX: e.clientX, startY: e.clientY, orig: selection };
+function SelectionOverlay({
+  selection,
+  onChange,
+  onCommit
+}) {
+  const dragRef = useRef(null); // { mode: "move"|"resize", startX, startY, orig } | null
+
+  const onPointerDownMove = e => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragRef.current = {
+      mode: "move",
+      startX: e.clientX,
+      startY: e.clientY,
+      orig: selection
     };
-    const onPointerDownResize = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        dragRef.current = { mode: "resize", startX: e.clientX, startY: e.clientY, orig: selection };
+  };
+  const onPointerDownResize = e => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragRef.current = {
+      mode: "resize",
+      startX: e.clientX,
+      startY: e.clientY,
+      orig: selection
     };
-    useEffect(() => {
-        const onMove = (e) => {
-            const d = dragRef.current;
-            if (!d)
-                return;
-            const dx = e.clientX - d.startX;
-            const dy = e.clientY - d.startY;
-            if (d.mode === "move") {
-                onChange({ ...d.orig, x: d.orig.x + dx, y: d.orig.y + dy });
-            }
-            else {
-                const newW = Math.max(12, d.orig.w + dx);
-                const newH = Math.max(12, d.orig.h + dy);
-                onChange({ ...d.orig, w: newW, h: newH });
-            }
-        };
-        const onUp = () => { dragRef.current = null; };
-        window.addEventListener("pointermove", onMove);
-        window.addEventListener("pointerup", onUp);
-        return () => {
-            window.removeEventListener("pointermove", onMove);
-            window.removeEventListener("pointerup", onUp);
-        };
-    }, [selection, onChange]);
-    return (React.createElement("div", { className: "selection-overlay", style: { left: selection.x, top: selection.y, width: selection.w, height: selection.h }, onPointerDown: onPointerDownMove, onDoubleClick: onCommit },
-        React.createElement("img", { src: selection.dataUrl, alt: "", draggable: false, className: "selection-overlay-img" }),
-        React.createElement("div", { className: "selection-handle", onPointerDown: onPointerDownResize })));
+  };
+  useEffect(() => {
+    const onMove = e => {
+      const d = dragRef.current;
+      if (!d) return;
+      const dx = e.clientX - d.startX;
+      const dy = e.clientY - d.startY;
+      if (d.mode === "move") {
+        onChange({
+          ...d.orig,
+          x: d.orig.x + dx,
+          y: d.orig.y + dy
+        });
+      } else {
+        const newW = Math.max(12, d.orig.w + dx);
+        const newH = Math.max(12, d.orig.h + dy);
+        onChange({
+          ...d.orig,
+          w: newW,
+          h: newH
+        });
+      }
+    };
+    const onUp = () => {
+      dragRef.current = null;
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+  }, [selection, onChange]);
+  return /*#__PURE__*/React.createElement("div", {
+    className: "selection-overlay",
+    style: {
+      left: selection.x,
+      top: selection.y,
+      width: selection.w,
+      height: selection.h
+    },
+    onPointerDown: onPointerDownMove,
+    onDoubleClick: onCommit
+  }, /*#__PURE__*/React.createElement("img", {
+    src: selection.dataUrl,
+    alt: "",
+    draggable: false,
+    className: "selection-overlay-img"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "selection-handle",
+    onPointerDown: onPointerDownResize
+  }));
 }
+
 // ---------- Image occlusion card creator ----------
 // Upload (or reuse) an image, draw boxes over the parts to be tested on, label
 // each one, and get back one card per box: front = image with just that region
 // masked, back = the full image plus the label. Boxes are stored normalized
 // (0-1) so the masking math is independent of how large the editor is on screen.
-function OcclusionCreator({ initialImage, initialNoteId, notes, onCancel, onCreate }) {
-    const [imageSrc, setImageSrc] = useState(initialImage || null);
-    const [boxes, setBoxes] = useState([]); // { id, x, y, w, h, label }
-    const [drawing, setDrawing] = useState(null); // { startX, startY, curX, curY } | null
-    const [linkedNoteId, setLinkedNoteId] = useState(initialNoteId || "");
-    const [imgError, setImgError] = useState("");
-    const [busy, setBusy] = useState(false);
-    const containerRef = useRef(null);
-    const handleFile = async (file) => {
-        if (!file)
-            return;
-        setImgError("");
-        try {
-            // Occlusion needs more resolution than the 900px cap used for plain note images,
-            // so small labels in a diagram stay legible.
-            const dataUrl = await compressImage(file, 1400, 0.85);
-            setImageSrc(dataUrl);
-            setBoxes([]);
-        }
-        catch (e) {
-            setImgError("Couldn't load that image — try a different file.");
-        }
+
+function OcclusionCreator({
+  initialImage,
+  initialNoteId,
+  notes,
+  onCancel,
+  onCreate
+}) {
+  const [imageSrc, setImageSrc] = useState(initialImage || null);
+  const [boxes, setBoxes] = useState([]); // { id, x, y, w, h, label }
+  const [drawing, setDrawing] = useState(null); // { startX, startY, curX, curY } | null
+  const [linkedNoteId, setLinkedNoteId] = useState(initialNoteId || "");
+  const [imgError, setImgError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const containerRef = useRef(null);
+  const handleFile = async file => {
+    if (!file) return;
+    setImgError("");
+    try {
+      // Occlusion needs more resolution than the 900px cap used for plain note images,
+      // so small labels in a diagram stay legible.
+      const dataUrl = await compressImage(file, 1400, 0.85);
+      setImageSrc(dataUrl);
+      setBoxes([]);
+    } catch (e) {
+      setImgError("Couldn't load that image — try a different file.");
+    }
+  };
+  const getRelativePoint = e => {
+    const rect = containerRef.current.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    return {
+      x: Math.min(Math.max(x, 0), 1),
+      y: Math.min(Math.max(y, 0), 1)
     };
-    const getRelativePoint = (e) => {
-        const rect = containerRef.current.getBoundingClientRect();
-        const x = (e.clientX - rect.left) / rect.width;
-        const y = (e.clientY - rect.top) / rect.height;
-        return { x: Math.min(Math.max(x, 0), 1), y: Math.min(Math.max(y, 0), 1) };
-    };
-    const startDraw = (e) => {
-        if (!imageSrc)
-            return;
-        e.preventDefault();
-        const p = getRelativePoint(e);
-        setDrawing({ startX: p.x, startY: p.y, curX: p.x, curY: p.y });
-    };
-    const moveDraw = (e) => {
-        if (!drawing)
-            return;
-        e.preventDefault();
-        const p = getRelativePoint(e);
-        setDrawing((d) => ({ ...d, curX: p.x, curY: p.y }));
-    };
-    const endDraw = () => {
-        if (!drawing)
-            return;
-        const x = Math.min(drawing.startX, drawing.curX);
-        const y = Math.min(drawing.startY, drawing.curY);
-        const w = Math.abs(drawing.curX - drawing.startX);
-        const h = Math.abs(drawing.curY - drawing.startY);
-        setDrawing(null);
-        if (w < 0.02 || h < 0.02)
-            return; // ignore accidental taps
-        setBoxes((cur) => [...cur, { id: uid(), x, y, w, h, label: `Region ${cur.length + 1}` }]);
-    };
-    const updateLabel = (id, label) => setBoxes((cur) => cur.map((b) => (b.id === id ? { ...b, label } : b)));
-    const removeBox = (id) => setBoxes((cur) => cur.filter((b) => b.id !== id));
-    const undoLastBox = () => setBoxes((cur) => cur.slice(0, -1));
-    const buildMaskedImage = (box) => new Promise((resolve, reject) => {
-        const img = new Image();
-        img.onerror = () => reject(new Error("Couldn't render the masked image"));
-        img.onload = () => {
-            const canvas = document.createElement("canvas");
-            canvas.width = img.naturalWidth;
-            canvas.height = img.naturalHeight;
-            const ctx = canvas.getContext("2d");
-            ctx.drawImage(img, 0, 0);
-            ctx.fillStyle = "#1B2A4A";
-            ctx.fillRect(box.x * img.naturalWidth, box.y * img.naturalHeight, box.w * img.naturalWidth, box.h * img.naturalHeight);
-            resolve(canvas.toDataURL("image/jpeg", 0.85));
-        };
-        img.src = imageSrc;
+  };
+  const startDraw = e => {
+    if (!imageSrc) return;
+    e.preventDefault();
+    // Keep receiving this finger's moves even past the image edge — boxing a label that sits
+    // near the border naturally drags slightly outside it, which used to end the box early.
+    if (e.currentTarget.setPointerCapture) {
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch (err) {/* not capturable; fine */}
+    }
+    const p = getRelativePoint(e);
+    setDrawing({
+      startX: p.x,
+      startY: p.y,
+      curX: p.x,
+      curY: p.y
     });
-    const handleCreate = async () => {
-        if (!imageSrc || boxes.length === 0)
-            return;
-        setBusy(true);
-        setImgError("");
-        try {
-            const cards = [];
-            for (const box of boxes) {
-                const frontImage = await buildMaskedImage(box);
-                cards.push({ frontImage, backImage: imageSrc, back: box.label.trim() || "Region" });
-            }
-            onCreate(cards, linkedNoteId || null);
-        }
-        catch (e) {
-            setImgError("Couldn't generate occlusion cards — try again.");
-        }
-        finally {
-            setBusy(false);
-        }
+  };
+  const moveDraw = e => {
+    if (!drawing) return;
+    e.preventDefault();
+    const p = getRelativePoint(e);
+    setDrawing(d => ({
+      ...d,
+      curX: p.x,
+      curY: p.y
+    }));
+  };
+  // Uses the lift position itself as the box's far corner. The last pointermove often lands
+  // well short of it on a phone (moves are batched per frame), and `drawing` here can also be
+  // a render behind the latest move — together that drew boxes visibly smaller than the drag.
+  const endDraw = e => {
+    if (!drawing) return;
+    const end = e && typeof e.clientX === "number" ? getRelativePoint(e) : {
+      x: drawing.curX,
+      y: drawing.curY
     };
-    return (React.createElement("div", { className: "modal-backdrop", onClick: onCancel },
-        React.createElement("div", { className: "modal wide", onClick: (e) => e.stopPropagation() },
-            React.createElement("div", { className: "modal-header" },
-                React.createElement("span", { className: "eyebrow" }, "Image occlusion"),
-                React.createElement("button", { className: "modal-close", onClick: onCancel }, "\u2715")),
-            !imageSrc ? (React.createElement(React.Fragment, null,
-                React.createElement("p", { className: "modal-copy" }, "Upload a diagram, then draw boxes over the parts you want to be quizzed on \u2014 each box becomes its own flashcard."),
-                React.createElement("label", { className: "btn-primary file-label", style: { width: "fit-content" } },
-                    "+ Upload image",
-                    React.createElement("input", { type: "file", accept: "image/*", className: "visually-hidden-file", onChange: (e) => handleFile(e.target.files && e.target.files[0]) })),
-                imgError && React.createElement("div", { className: "gen-error" }, imgError),
-                React.createElement("div", { className: "modal-actions" },
-                    React.createElement("button", { className: "btn-ghost", onClick: onCancel }, "Cancel")))) : (React.createElement(React.Fragment, null,
-                React.createElement("p", { className: "modal-copy" }, "Drag on the image to draw a box over a region, then label it below. Add as many as you like."),
-                React.createElement("div", { className: "occlusion-canvas-wrap", ref: containerRef, onPointerDown: startDraw, onPointerMove: moveDraw, onPointerUp: endDraw, onPointerLeave: endDraw },
-                    React.createElement("img", { src: imageSrc, alt: "", className: "occlusion-base-image", draggable: false }),
-                    boxes.map((b) => (React.createElement("div", { key: b.id, className: "occlusion-box", style: { left: `${b.x * 100}%`, top: `${b.y * 100}%`, width: `${b.w * 100}%`, height: `${b.h * 100}%` } }))),
-                    drawing && (React.createElement("div", { className: "occlusion-box drawing", style: {
-                            left: `${Math.min(drawing.startX, drawing.curX) * 100}%`,
-                            top: `${Math.min(drawing.startY, drawing.curY) * 100}%`,
-                            width: `${Math.abs(drawing.curX - drawing.startX) * 100}%`,
-                            height: `${Math.abs(drawing.curY - drawing.startY) * 100}%`,
-                        } }))),
-                React.createElement("div", { className: "occlusion-toolbar-row" },
-                    React.createElement("span", { className: "occlusion-box-count" },
-                        boxes.length,
-                        " box",
-                        boxes.length === 1 ? "" : "es"),
-                    React.createElement("button", { className: "btn-ghost small", onClick: undoLastBox, disabled: boxes.length === 0 }, "\u21BA Undo last box")),
-                boxes.length > 0 && (React.createElement("div", { className: "occlusion-label-list" }, boxes.map((b, i) => (React.createElement("div", { key: b.id, className: "occlusion-label-row" },
-                    React.createElement("span", { className: "occlusion-label-index" }, i + 1),
-                    React.createElement("input", { value: b.label, onChange: (e) => updateLabel(b.id, e.target.value), placeholder: "Label this region\u2026" }),
-                    React.createElement("button", { onClick: () => removeBox(b.id) }, "\u2715")))))),
-                notes && notes.length > 0 && (React.createElement("div", { className: "study-filter-row" },
-                    React.createElement("label", { className: "field-label" }, "Link these cards to a note (optional)"),
-                    React.createElement("select", { className: "parent-select", value: linkedNoteId, onChange: (e) => setLinkedNoteId(e.target.value) },
-                        React.createElement("option", { value: "" }, "Don't link to a note"),
-                        notes.map((n) => (React.createElement("option", { key: n.id, value: n.id }, n.title)))))),
-                imgError && React.createElement("div", { className: "gen-error" }, imgError),
-                React.createElement("div", { className: "modal-actions" },
-                    React.createElement("button", { className: "btn-ghost", onClick: () => setImageSrc(initialImage || null) }, initialImage ? "Reset boxes" : "Change image"),
-                    React.createElement("button", { className: "btn-primary", onClick: handleCreate, disabled: boxes.length === 0 || busy }, busy ? "Creating…" : `Create ${boxes.length} card${boxes.length === 1 ? "" : "s"}`)))))));
+    const x = Math.min(drawing.startX, end.x);
+    const y = Math.min(drawing.startY, end.y);
+    const w = Math.abs(end.x - drawing.startX);
+    const h = Math.abs(end.y - drawing.startY);
+    setDrawing(null);
+    if (w < 0.02 || h < 0.02) return; // ignore accidental taps
+    setBoxes(cur => [...cur, {
+      id: uid(),
+      x,
+      y,
+      w,
+      h,
+      label: `Region ${cur.length + 1}`
+    }]);
+  };
+  const updateLabel = (id, label) => setBoxes(cur => cur.map(b => b.id === id ? {
+    ...b,
+    label
+  } : b));
+  const removeBox = id => setBoxes(cur => cur.filter(b => b.id !== id));
+  const undoLastBox = () => setBoxes(cur => cur.slice(0, -1));
+  const buildMaskedImage = box => new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onerror = () => reject(new Error("Couldn't render the masked image"));
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      ctx.fillStyle = "#1B2A4A";
+      ctx.fillRect(box.x * img.naturalWidth, box.y * img.naturalHeight, box.w * img.naturalWidth, box.h * img.naturalHeight);
+      resolve(canvas.toDataURL("image/jpeg", 0.85));
+    };
+    img.src = imageSrc;
+  });
+  const handleCreate = async () => {
+    if (!imageSrc || boxes.length === 0) return;
+    setBusy(true);
+    setImgError("");
+    try {
+      const cards = [];
+      for (const box of boxes) {
+        const frontImage = await buildMaskedImage(box);
+        cards.push({
+          frontImage,
+          backImage: imageSrc,
+          back: box.label.trim() || "Region"
+        });
+      }
+      onCreate(cards, linkedNoteId || null);
+    } catch (e) {
+      setImgError("Couldn't generate occlusion cards — try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    className: "modal-backdrop",
+    onClick: onCancel
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal wide",
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal-header"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "eyebrow"
+  }, "Image occlusion"), /*#__PURE__*/React.createElement("button", {
+    className: "modal-close",
+    onClick: onCancel
+  }, "\u2715")), !imageSrc ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+    className: "modal-copy"
+  }, "Upload a diagram, then draw boxes over the parts you want to be quizzed on \u2014 each box becomes its own flashcard."), /*#__PURE__*/React.createElement("label", {
+    className: "btn-primary file-label",
+    style: {
+      width: "fit-content"
+    }
+  }, "+ Upload image", /*#__PURE__*/React.createElement("input", {
+    type: "file",
+    accept: "image/*",
+    className: "visually-hidden-file",
+    onChange: e => handleFile(e.target.files && e.target.files[0])
+  })), imgError && /*#__PURE__*/React.createElement("div", {
+    className: "gen-error"
+  }, imgError), /*#__PURE__*/React.createElement("div", {
+    className: "modal-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost",
+    onClick: onCancel
+  }, "Cancel"))) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+    className: "modal-copy"
+  }, "Drag on the image to draw a box over a region, then label it below. Add as many as you like."), /*#__PURE__*/React.createElement("div", {
+    className: "occlusion-canvas-wrap",
+    ref: containerRef,
+    onPointerDown: startDraw,
+    onPointerMove: moveDraw,
+    onPointerUp: endDraw,
+    onPointerLeave: endDraw,
+    onPointerCancel: () => setDrawing(null)
+  }, /*#__PURE__*/React.createElement("img", {
+    src: imageSrc,
+    alt: "",
+    className: "occlusion-base-image",
+    draggable: false
+  }), boxes.map(b => /*#__PURE__*/React.createElement("div", {
+    key: b.id,
+    className: "occlusion-box",
+    style: {
+      left: `${b.x * 100}%`,
+      top: `${b.y * 100}%`,
+      width: `${b.w * 100}%`,
+      height: `${b.h * 100}%`
+    }
+  })), drawing && /*#__PURE__*/React.createElement("div", {
+    className: "occlusion-box drawing",
+    style: {
+      left: `${Math.min(drawing.startX, drawing.curX) * 100}%`,
+      top: `${Math.min(drawing.startY, drawing.curY) * 100}%`,
+      width: `${Math.abs(drawing.curX - drawing.startX) * 100}%`,
+      height: `${Math.abs(drawing.curY - drawing.startY) * 100}%`
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "occlusion-toolbar-row"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "occlusion-box-count"
+  }, boxes.length, " box", boxes.length === 1 ? "" : "es"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small",
+    onClick: undoLastBox,
+    disabled: boxes.length === 0
+  }, "\u21BA Undo last box")), boxes.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "occlusion-label-list"
+  }, boxes.map((b, i) => /*#__PURE__*/React.createElement("div", {
+    key: b.id,
+    className: "occlusion-label-row"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "occlusion-label-index"
+  }, i + 1), /*#__PURE__*/React.createElement("input", {
+    value: b.label,
+    onChange: e => updateLabel(b.id, e.target.value),
+    placeholder: "Label this region\u2026"
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => removeBox(b.id)
+  }, "\u2715")))), notes && notes.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "study-filter-row"
+  }, /*#__PURE__*/React.createElement("label", {
+    className: "field-label"
+  }, "Link these cards to a note (optional)"), /*#__PURE__*/React.createElement("select", {
+    className: "parent-select",
+    value: linkedNoteId,
+    onChange: e => setLinkedNoteId(e.target.value)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "Don't link to a note"), notes.map(n => /*#__PURE__*/React.createElement("option", {
+    key: n.id,
+    value: n.id
+  }, n.title)))), imgError && /*#__PURE__*/React.createElement("div", {
+    className: "gen-error"
+  }, imgError), /*#__PURE__*/React.createElement("div", {
+    className: "modal-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost",
+    onClick: () => setImageSrc(initialImage || null)
+  }, initialImage ? "Reset boxes" : "Change image"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    onClick: handleCreate,
+    disabled: boxes.length === 0 || busy
+  }, busy ? "Creating…" : `Create ${boxes.length} card${boxes.length === 1 ? "" : "s"}`)))));
 }
+
 // ---------- Quick add (Keep-style) ----------
-function QuickAddNote({ onAdd, onViewImage, onImageError }) {
-    const [open, setOpen] = useState(false);
-    const [title, setTitle] = useState("");
-    const [bodyHTML, setBodyHTML] = useState("");
-    const [tagInput, setTagInput] = useState("");
-    const [tagNames, setTagNames] = useState([]);
-    const [color, setColor] = useState(null);
-    const [images, setImages] = useState([]);
-    const [imgBusy, setImgBusy] = useState(false);
-    const [imgError, setImgError] = useState("");
-    const [showDraw, setShowDraw] = useState(false);
-    const [resetKey, setResetKey] = useState(0);
-    const reset = () => {
-        setTitle("");
-        setBodyHTML("");
-        setTagInput("");
-        setTagNames([]);
-        setColor(null);
-        setImages([]);
-        setImgError("");
-        setOpen(false);
-        setResetKey((k) => k + 1); // remounts RichTextEditor so its internal ref clears
-    };
-    const addTagFromInput = () => {
-        const parts = tagInput.split(",").map((p) => p.trim()).filter(Boolean);
-        if (!parts.length)
-            return;
-        setTagNames((cur) => [...new Set([...cur, ...parts])]);
-        setTagInput("");
-    };
-    const addImageFiles = async (files) => {
-        if (!files.length)
-            return;
-        setImgBusy(true);
-        setImgError("");
-        try {
-            const compressed = await Promise.all(files.map((f) => compressImage(f)));
-            setImages((cur) => [...cur, ...compressed.map((dataUrl) => ({ id: uid(), dataUrl }))]);
-        }
-        catch (e) {
-            setImgError("Couldn't add that image — try a different file.");
-        }
-        finally {
-            setImgBusy(false);
-        }
-    };
-    const removeImage = (id) => setImages((cur) => cur.filter((img) => img.id !== id));
-    const updateImage = (id, dataUrl) => setImages((cur) => cur.map((img) => (img.id === id ? { ...img, dataUrl } : img)));
-    const [annotatingThumb, setAnnotatingThumb] = useState(null); // { id, dataUrl } | null
-    const handleSubmit = () => {
-        if (!htmlToPlainText(bodyHTML).trim()) {
-            reset();
-            return;
-        }
-        onAdd(title, bodyHTML, tagNames, color, images);
-        reset();
-    };
-    return (React.createElement("div", { className: "quick-add-wrap", style: { background: color || "var(--surface)", "--note-ink": color ? "#241C3D" : undefined, "--note-muted": color ? "rgba(36,28,61,0.65)" : undefined } },
-        !open ? (React.createElement("button", { className: "quick-add-collapsed", onClick: () => setOpen(true) }, "Take a note\u2026")) : (React.createElement("div", { className: "quick-add-expanded" },
-            React.createElement("input", { className: "title-input", placeholder: "Title (optional)", value: title, onChange: (e) => setTitle(e.target.value) }),
-            React.createElement(RichTextEditor, { key: resetKey, initialHTML: "", placeholder: "Write or paste a note\u2026", onChange: setBodyHTML, onImageError: onImageError }),
-            React.createElement("p", { className: "hint-line" },
-                "Tip: a line like ",
-                React.createElement("b", null, "question :: answer"),
-                " auto-creates a linked flashcard on save."),
-            React.createElement("div", { className: "image-row" },
-                React.createElement("label", { className: "btn-ghost small file-label" },
-                    imgBusy ? "Adding…" : "+ Image",
-                    React.createElement("input", { type: "file", accept: "image/*", multiple: true, className: "visually-hidden-file", onChange: (e) => {
-                            addImageFiles(Array.from(e.target.files || []));
-                            e.target.value = "";
-                        } })),
-                React.createElement("button", { className: "btn-ghost small", onClick: () => setShowDraw(true) }, "\u270E Draw"),
-                imgError && React.createElement("span", { className: "gen-error" }, imgError)),
-            images.length > 0 && (React.createElement("div", { className: "image-thumbs" }, images.map((img) => (React.createElement("div", { key: img.id, className: "image-thumb-wrap" },
-                React.createElement("img", { src: img.dataUrl, alt: "", className: "image-thumb-full", onClick: () => onViewImage && onViewImage(img.dataUrl), style: { cursor: "zoom-in" } }),
-                React.createElement("button", { className: "image-thumb-annotate", title: "Annotate", onClick: () => setAnnotatingThumb(img) }, "\u270E"),
-                React.createElement("button", { className: "image-thumb-remove", onClick: () => removeImage(img.id) }, "\u2715")))))),
-            annotatingThumb && (React.createElement(DrawingCanvas, { backgroundImageUrl: annotatingThumb.dataUrl, onCancel: () => setAnnotatingThumb(null), onSave: (dataUrl) => {
-                    updateImage(annotatingThumb.id, dataUrl);
-                    setAnnotatingThumb(null);
-                } })),
-            tagNames.length > 0 && (React.createElement("div", { className: "quick-add-tags" }, tagNames.map((t) => (React.createElement("span", { key: t, className: "tag-pill editable" },
-                "#",
-                t,
-                " ",
-                React.createElement("button", { onClick: () => setTagNames((cur) => cur.filter((x) => x !== t)) }, "\u2715")))))),
-            React.createElement("input", { className: "quick-add-tag-input", placeholder: "Add tag, comma or enter", value: tagInput, onChange: (e) => setTagInput(e.target.value), onKeyDown: (e) => {
-                    if (e.key === "Enter" || e.key === ",") {
-                        e.preventDefault();
-                        addTagFromInput();
-                    }
-                }, onBlur: addTagFromInput }),
-            React.createElement("div", { className: "quick-add-footer" },
-                React.createElement("div", { className: "color-dot-row" }, NOTE_COLORS.map((c) => (React.createElement("button", { key: c.name, className: "color-dot" + (color === c.hex ? " selected" : ""), style: { background: c.hex || "var(--surface)" }, title: c.name, onClick: () => setColor(c.hex) })))),
-                React.createElement("div", { className: "quick-add-actions" },
-                    React.createElement("button", { className: "btn-ghost small", onClick: reset }, "Close"),
-                    React.createElement("button", { className: "btn-primary", onClick: handleSubmit }, "Add"))))),
-        showDraw && (React.createElement(DrawingCanvas, { onCancel: () => setShowDraw(false), onSave: (dataUrl) => {
-                setImages((cur) => [...cur, { id: uid(), dataUrl }]);
-                setShowDraw(false);
-            } }))));
+
+function QuickAddNote({
+  onAdd,
+  onViewImage,
+  onImageError,
+  onSaveError
+}) {
+  const [open, setOpen] = useState(false);
+  const [title, setTitle] = useState("");
+  const [bodyHTML, setBodyHTML] = useState("");
+  const [tagInput, setTagInput] = useState("");
+  const [tagNames, setTagNames] = useState([]);
+  const [color, setColor] = useState(null);
+  const [images, setImages] = useState([]);
+  const [imgBusy, setImgBusy] = useState(false);
+  const [imgError, setImgError] = useState("");
+  const [showDraw, setShowDraw] = useState(false);
+  const [resetKey, setResetKey] = useState(0);
+  const reset = () => {
+    setTitle("");
+    setBodyHTML("");
+    setTagInput("");
+    setTagNames([]);
+    setColor(null);
+    setImages([]);
+    setImgError("");
+    setOpen(false);
+    setResetKey(k => k + 1); // remounts RichTextEditor so its internal ref clears
+  };
+  const addTagFromInput = () => {
+    const parts = tagInput.split(",").map(p => p.trim()).filter(Boolean);
+    if (!parts.length) return;
+    setTagNames(cur => [...new Set([...cur, ...parts])]);
+    setTagInput("");
+  };
+  const addImageFiles = async files => {
+    if (!files.length) return;
+    setImgBusy(true);
+    setImgError("");
+    try {
+      const compressed = await Promise.all(files.map(f => compressImage(f)));
+      setImages(cur => [...cur, ...compressed.map(dataUrl => ({
+        id: uid(),
+        dataUrl
+      }))]);
+    } catch (e) {
+      setImgError("Couldn't add that image — try a different file.");
+    } finally {
+      setImgBusy(false);
+    }
+  };
+  const removeImage = id => setImages(cur => cur.filter(img => img.id !== id));
+  const updateImage = (id, dataUrl) => setImages(cur => cur.map(img => img.id === id ? {
+    ...img,
+    dataUrl
+  } : img));
+  const [annotatingThumb, setAnnotatingThumb] = useState(null); // { id, dataUrl } | null
+
+  const handleSubmit = async () => {
+    if (!noteHasContent(title, bodyHTML, images)) {
+      reset();
+      return;
+    }
+    // Await + only reset() on success — otherwise a failed save (onAdd rejects) still
+    // cleared the form, silently losing what was typed with no visible sign anything went wrong.
+    try {
+      await onAdd(title, bodyHTML, tagNames, color, images);
+      reset();
+    } catch (e) {
+      if (onSaveError) onSaveError(`Couldn't save note: ${e && e.message ? e.message : e}`);
+    }
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    className: "quick-add-wrap",
+    style: {
+      background: color || "var(--surface)",
+      "--note-ink": color ? "#241C3D" : undefined,
+      "--note-muted": color ? "rgba(36,28,61,0.65)" : undefined
+    }
+  }, !open ? /*#__PURE__*/React.createElement("button", {
+    className: "quick-add-collapsed",
+    onClick: () => setOpen(true)
+  }, "Take a note\u2026") : /*#__PURE__*/React.createElement("div", {
+    className: "quick-add-expanded"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "title-input",
+    placeholder: "Title (optional)",
+    value: title,
+    onChange: e => setTitle(e.target.value)
+  }), /*#__PURE__*/React.createElement(RichTextEditor, {
+    key: resetKey,
+    initialHTML: "",
+    placeholder: "Write or paste a note\u2026",
+    onChange: setBodyHTML,
+    onImageError: onImageError
+  }), /*#__PURE__*/React.createElement("p", {
+    className: "hint-line"
+  }, "Tip: a line like ", /*#__PURE__*/React.createElement("b", null, "question :: answer"), " auto-creates a linked flashcard on save."), /*#__PURE__*/React.createElement("div", {
+    className: "image-row"
+  }, /*#__PURE__*/React.createElement("label", {
+    className: "btn-ghost small file-label"
+  }, imgBusy ? "Adding…" : "+ Image", /*#__PURE__*/React.createElement("input", {
+    type: "file",
+    accept: "image/*",
+    multiple: true,
+    className: "visually-hidden-file",
+    onChange: e => {
+      addImageFiles(Array.from(e.target.files || []));
+      e.target.value = "";
+    }
+  })), /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small",
+    onClick: () => setShowDraw(true)
+  }, "\u270E Draw"), imgError && /*#__PURE__*/React.createElement("span", {
+    className: "gen-error"
+  }, imgError)), images.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "image-thumbs"
+  }, images.map(img => /*#__PURE__*/React.createElement("div", {
+    key: img.id,
+    className: "image-thumb-wrap"
+  }, /*#__PURE__*/React.createElement("img", {
+    src: img.dataUrl,
+    alt: "",
+    className: "image-thumb-full",
+    onClick: () => onViewImage && onViewImage(img.dataUrl),
+    style: {
+      cursor: "zoom-in"
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "image-thumb-annotate",
+    title: "Annotate",
+    onClick: () => setAnnotatingThumb(img)
+  }, "\u270E"), /*#__PURE__*/React.createElement("button", {
+    className: "image-thumb-remove",
+    onClick: () => removeImage(img.id)
+  }, "\u2715")))), annotatingThumb && /*#__PURE__*/React.createElement(DrawingCanvas, {
+    backgroundImageUrl: annotatingThumb.dataUrl,
+    onCancel: () => setAnnotatingThumb(null),
+    onSave: dataUrl => {
+      updateImage(annotatingThumb.id, dataUrl);
+      setAnnotatingThumb(null);
+    }
+  }), tagNames.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "quick-add-tags"
+  }, tagNames.map(t => /*#__PURE__*/React.createElement("span", {
+    key: t,
+    className: "tag-pill editable"
+  }, "#", t, " ", /*#__PURE__*/React.createElement("button", {
+    onClick: () => setTagNames(cur => cur.filter(x => x !== t))
+  }, "\u2715")))), /*#__PURE__*/React.createElement("input", {
+    className: "quick-add-tag-input",
+    placeholder: "Add tag, comma or enter",
+    value: tagInput,
+    onChange: e => setTagInput(e.target.value),
+    onKeyDown: e => {
+      if (e.key === "Enter" || e.key === ",") {
+        e.preventDefault();
+        addTagFromInput();
+      }
+    },
+    onBlur: addTagFromInput
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "quick-add-footer"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "color-dot-row"
+  }, NOTE_COLORS.map(c => /*#__PURE__*/React.createElement("button", {
+    key: c.name,
+    className: "color-dot" + (color === c.hex ? " selected" : ""),
+    style: {
+      background: c.hex || "var(--surface)"
+    },
+    title: c.name,
+    onClick: () => setColor(c.hex)
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "quick-add-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small",
+    onClick: reset
+  }, "Close"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    onClick: handleSubmit
+  }, "Add")))), showDraw && /*#__PURE__*/React.createElement(DrawingCanvas, {
+    onCancel: () => setShowDraw(false),
+    onSave: dataUrl => {
+      setImages(cur => [...cur, {
+        id: uid(),
+        dataUrl
+      }]);
+      setShowDraw(false);
+    }
+  }));
 }
+
 // ---------- Full note editor ----------
-function NoteEditor({ note, allTags, existingTagIds, tagName, subjectOptions, currentSubjectId, allNotes, subjects, onCancel, onSave, onCreateCard, onCreateCards, openRouterKey, onOccludeImage, onViewImage, onNavigateToNote, onSplitWithNote, onSplitWithCards, isSplitPane, onImageError }) {
-    const [title, setTitle] = useState(note.title || "");
-    const [bodyHTML, setBodyHTML] = useState(note.bodyHTML || "");
-    const [tagInput, setTagInput] = useState("");
-    const [tagNames, setTagNames] = useState(existingTagIds.map(tagName).filter(Boolean));
-    const [images, setImages] = useState(note.images || []);
-    const [color, setColor] = useState(note.color || null);
-    const [subjectId, setSubjectId] = useState(note.subjectId || currentSubjectId || "");
-    const [linkedNoteIds, setLinkedNoteIds] = useState(note.linkedNoteIds || []);
-    const [noteSearch, setNoteSearch] = useState("");
-    const [splitMenuOpen, setSplitMenuOpen] = useState(false);
-    const scrollRegionRef = useRef(null);
-    const scrollContentRef = useRef(null);
-    const [scrollFade, setScrollFade] = useState({ top: false, bottom: false });
-    const [scrollThumb, setScrollThumb] = useState({ visible: false, top: 0, height: 20 });
-    const [aiBusy, setAiBusy] = useState(""); // "" | "summarize" | "format" | "flashcards" | "ask" -- which action, if any, is in flight
-    const [aiError, setAiError] = useState("");
-    const [summaryResult, setSummaryResult] = useState("");
-    const [flashcardPreview, setFlashcardPreview] = useState(null); // parsed {front, back}[] pending confirm
-    const [showAskNote, setShowAskNote] = useState(false);
-    const [askQuestion, setAskQuestion] = useState("");
-    const [askAnswer, setAskAnswer] = useState("");
-    const checkScrollFade = () => {
-        const el = scrollRegionRef.current;
-        if (!el)
-            return;
-        const { scrollTop, scrollHeight, clientHeight } = el;
-        setScrollFade({
-            top: scrollTop > 2,
-            bottom: scrollTop + clientHeight < scrollHeight - 2,
-        });
-        // A real, always-visible scrollbar thumb — built from a plain DOM
-        // element we position ourselves, not the browser's native scrollbar.
-        // Mobile browsers won't let a page force their native scrollbar to
-        // stay visible, but there's nothing stopping a page from drawing its
-        // own — this is that.
-        if (scrollHeight <= clientHeight + 2) {
-            setScrollThumb({ visible: false, top: 0, height: 20 });
-        }
-        else {
-            const thumbHeightPct = Math.max(10, (clientHeight / scrollHeight) * 100);
-            const maxScroll = scrollHeight - clientHeight;
-            const scrollRatio = maxScroll > 0 ? scrollTop / maxScroll : 0;
-            const thumbTopPct = scrollRatio * (100 - thumbHeightPct);
-            setScrollThumb({ visible: true, top: thumbTopPct, height: thumbHeightPct });
-        }
-    };
-    // Belt-and-suspenders: regardless of where focus/cursor placement might
-    // otherwise leave the scroll position, opening a note always starts by
-    // showing its top — title, subject, and the beginning of the text.
-    useEffect(() => {
-        if (scrollRegionRef.current)
-            scrollRegionRef.current.scrollTop = 0;
-        checkScrollFade();
-        window.addEventListener("resize", checkScrollFade);
-        return () => window.removeEventListener("resize", checkScrollFade);
-    }, []);
-    // The scroll-fade/scrollbar state above only gets recomputed when
-    // something explicitly asks it to. That misses real cases — an image
-    // finishing an async load, a drawing added via the separate `images`
-    // state, a font loading — anything that changes the note's actual
-    // rendered height without touching bodyHTML. A ResizeObserver on the
-    // actual content (not the scroll container, which is a fixed height by
-    // the flex layout and wouldn't report this) catches all of these
-    // uniformly, regardless of what caused the growth.
-    useEffect(() => {
-        if (typeof ResizeObserver === "undefined" || !scrollContentRef.current)
-            return;
-        const observer = new ResizeObserver(() => checkScrollFade());
-        observer.observe(scrollContentRef.current);
-        return () => observer.disconnect();
-    }, []);
-    // Content grows as you type or insert images — keep the "more below" hint
-    // honest even without an actual scroll event happening.
-    useEffect(() => {
-        checkScrollFade();
-    }, [bodyHTML]);
-    const [splitPickerOpen, setSplitPickerOpen] = useState(false);
-    const [splitPickerQuery, setSplitPickerQuery] = useState("");
-    const [imgBusy, setImgBusy] = useState(false);
-    const [imgError, setImgError] = useState("");
-    const [showDraw, setShowDraw] = useState(false);
-    const [pendingHighlight, setPendingHighlight] = useState(null); // { front, back } | null
-    const addTagFromInput = () => {
-        const parts = tagInput.split(",").map((p) => p.trim()).filter(Boolean);
-        if (!parts.length)
-            return;
-        setTagNames((cur) => [...new Set([...cur, ...parts])]);
-        setTagInput("");
-    };
-    const removeTag = (name) => setTagNames((cur) => cur.filter((t) => t !== name));
-    const addImageFiles = async (files) => {
-        if (!files.length)
-            return;
-        setImgBusy(true);
-        setImgError("");
-        try {
-            const compressed = await Promise.all(files.map((f) => compressImage(f)));
-            setImages((cur) => [...cur, ...compressed.map((dataUrl) => ({ id: uid(), dataUrl }))]);
-        }
-        catch (e) {
-            setImgError("Couldn't add that image — try a different file.");
-        }
-        finally {
-            setImgBusy(false);
-        }
-    };
-    const removeImage = (id) => setImages((cur) => cur.filter((img) => img.id !== id));
-    const updateImage = (id, dataUrl) => setImages((cur) => cur.map((img) => (img.id === id ? { ...img, dataUrl } : img)));
-    const [annotatingThumb, setAnnotatingThumb] = useState(null); // { id, dataUrl } | null
-    const subjectNameFor = (sid) => (subjects || []).find((s) => s.id === sid)?.name || "";
-    const subjectColorFor = (sid) => (subjects || []).find((s) => s.id === sid)?.color || "#6C5CE7";
-    const noteSearchResults = useMemo(() => {
-        const q = noteSearch.trim().toLowerCase();
-        if (!q)
-            return [];
-        return (allNotes || [])
-            .filter((n) => n.id !== note.id && !linkedNoteIds.includes(n.id) && n.title.toLowerCase().includes(q))
-            .slice(0, 8);
-    }, [noteSearch, allNotes, note.id, linkedNoteIds]);
-    const splitPickerResults = useMemo(() => {
-        const q = splitPickerQuery.trim().toLowerCase();
-        const base = allNotes || [];
-        if (!q)
-            return base.slice(0, 8);
-        return base.filter((n) => n.title.toLowerCase().includes(q)).slice(0, 8);
-    }, [splitPickerQuery, allNotes]);
-    const linkedNotes = linkedNoteIds
-        .map((id) => (allNotes || []).find((n) => n.id === id))
-        .filter(Boolean); // silently drops dangling references (e.g. the linked note was deleted)
-    const backlinkNotes = note.id
-        ? (allNotes || []).filter((n) => n.id !== note.id && (n.linkedNoteIds || []).includes(note.id))
-        : [];
-    const addLink = (noteId) => {
-        setLinkedNoteIds((cur) => [...new Set([...cur, noteId])]);
-        setNoteSearch("");
-    };
-    const removeLink = (noteId) => setLinkedNoteIds((cur) => cur.filter((id) => id !== noteId));
-    const handleSave = () => {
-        if (!htmlToPlainText(bodyHTML).trim())
-            return;
-        onSave({ title: title.trim(), bodyHTML, tagNames, images, color, subjectId, linkedNoteIds });
-    };
-    const confirmHighlightCard = () => {
-        if (!pendingHighlight || !pendingHighlight.back.trim() || !note.id)
-            return;
-        onCreateCard(note.id, pendingHighlight.front, pendingHighlight.back.trim());
-        setPendingHighlight(null);
-    };
-    // ---- AI features (Summarize / Format / Auto-flashcards / Ask) ----
-    // All four share the same guard-and-error shape: bail out with a
-    // clear message if there's no key yet, clear any previous
-    // error/result before starting, surface OpenRouter's own error
-    // message on failure (already specific per callOpenRouter above)
-    // rather than a generic "something went wrong".
-    const handleSummarize = async () => {
-        if (!openRouterKey) {
-            setAiError("Add your OpenRouter API key in Settings first.");
-            return;
-        }
-        setAiBusy("summarize");
-        setAiError("");
-        setSummaryResult("");
-        try {
-            const result = await callOpenRouter(openRouterKey, buildSummarizePrompt(title || "Untitled", htmlToPlainText(bodyHTML)));
-            setSummaryResult(result.trim());
-        }
-        catch (e) {
-            setAiError(e.message);
-        }
-        finally {
-            setAiBusy("");
-        }
-    };
-    const insertSummaryIntoNote = () => {
-        if (!summaryResult)
-            return;
-        setBodyHTML((cur) => `<p><em>${escapeHTML(summaryResult)}</em></p>` + cur);
-        setSummaryResult("");
-    };
-    const handleFormat = async () => {
-        if (!openRouterKey) {
-            setAiError("Add your OpenRouter API key in Settings first.");
-            return;
-        }
-        const plain = htmlToPlainText(bodyHTML);
-        if (!plain.trim()) {
-            setAiError("Nothing to format yet — write or paste something first.");
-            return;
-        }
-        setAiBusy("format");
-        setAiError("");
-        try {
-            const result = await callOpenRouter(openRouterKey, buildFormatPrompt(plain));
-            // Applied directly rather than previewed first — unlike Auto-
-            // flashcards (which creates new, separate data) this REPLACES
-            // the note body, so undo is just Cancel without saving; a
-            // separate preview step would duplicate that same safety net.
-            setBodyHTML(result.trim());
-            showToast("Formatted");
-        }
-        catch (e) {
-            setAiError(e.message);
-        }
-        finally {
-            setAiBusy("");
-        }
-    };
-    const handleGenerateFlashcards = async () => {
-        if (!openRouterKey) {
-            setAiError("Add your OpenRouter API key in Settings first.");
-            return;
-        }
-        const plain = htmlToPlainText(bodyHTML);
-        if (!plain.trim()) {
-            setAiError("Nothing to generate cards from yet.");
-            return;
-        }
-        setAiBusy("flashcards");
-        setAiError("");
-        try {
-            const raw = await callOpenRouter(openRouterKey, buildFlashcardsPrompt(title || "Untitled", plain));
-            const cards = parseFlashcardsResponse(raw);
-            if (!cards.length) {
-                setAiError("The AI didn't return any usable flashcards — try again.");
-                return;
-            }
-            setFlashcardPreview(cards);
-        }
-        catch (e) {
-            setAiError(e.message);
-        }
-        finally {
-            setAiBusy("");
-        }
-    };
-    const confirmAiFlashcards = () => {
-        if (!flashcardPreview || !note.id)
-            return;
-        onCreateCards(note.id, subjectId, flashcardPreview);
-        setFlashcardPreview(null);
-    };
-    const handleAskAboutNote = async () => {
-        if (!openRouterKey) {
-            setAiError("Add your OpenRouter API key in Settings first.");
-            return;
-        }
-        if (!askQuestion.trim())
-            return;
-        setAiBusy("ask");
-        setAiError("");
-        setAskAnswer("");
-        try {
-            const result = await callOpenRouter(openRouterKey, buildAskPrompt(askQuestion.trim(), htmlToPlainText(bodyHTML)));
-            setAskAnswer(result.trim());
-        }
-        catch (e) {
-            setAiError(e.message);
-        }
-        finally {
-            setAiBusy("");
-        }
-    };
-    return (React.createElement("div", { className: "note-editor-pane" + (isSplitPane ? " split" : ""), style: { background: color || "var(--surface)", "--note-ink": color ? "#241C3D" : undefined, "--note-muted": color ? "rgba(36,28,61,0.65)" : undefined, "--note-bg": color || "var(--surface)" } },
-        React.createElement("div", { className: "modal-header" },
-            React.createElement("span", { className: "eyebrow" }, note.id ? "Edit note" : "New note"),
-            React.createElement("div", { className: "note-editor-header-actions" },
-                !isSplitPane && note.id && (onSplitWithCards || onSplitWithNote) && (React.createElement("div", { className: "split-menu-wrap" },
-                    React.createElement("button", { className: "btn-ghost small", onClick: () => setSplitMenuOpen((v) => !v) }, "+ Split view"),
-                    splitMenuOpen && (React.createElement("div", { className: "split-menu" },
-                        onSplitWithCards && (React.createElement("button", { onClick: () => {
-                                onSplitWithCards(note.id, note.subjectId);
-                                setSplitMenuOpen(false);
-                            } },
-                            "\u25A4 This note's flashcards",
-                            React.createElement("span", { className: "split-menu-desc" }, "See and study cards made from this note"))),
-                        onSplitWithNote && note.id && (React.createElement("button", { onClick: () => {
-                                onSplitWithNote(note.id);
-                                setSplitMenuOpen(false);
-                            } },
-                            "\uD83D\uDCC4 This note (side by side)",
-                            React.createElement("span", { className: "split-menu-desc" }, "View or edit two places in the same note at once"))),
-                        onSplitWithNote && (React.createElement("button", { onClick: () => {
-                                setSplitMenuOpen(false);
-                                setSplitPickerOpen(true);
-                            } },
-                            "\uD83D\uDCDD Another note",
-                            React.createElement("span", { className: "split-menu-desc" }, "Open a different note side by side"))))))),
-                React.createElement("button", { className: "modal-close", onClick: onCancel }, isSplitPane ? "✕ Close pane" : "✕"))),
-        React.createElement("div", { className: "ai-toolbar" },
-            React.createElement("button", { className: "btn-ghost small", onClick: handleSummarize, disabled: !!aiBusy }, aiBusy === "summarize" ? "Summarizing…" : "✨ Summarize"),
-            React.createElement("button", { className: "btn-ghost small", onClick: handleFormat, disabled: !!aiBusy }, aiBusy === "format" ? "Formatting…" : "🪄 Format"),
-            note.id && (React.createElement("button", { className: "btn-ghost small", onClick: handleGenerateFlashcards, disabled: !!aiBusy }, aiBusy === "flashcards" ? "Generating…" : "🎴 Auto-flashcards")),
-            React.createElement("button", { className: "btn-ghost small", onClick: () => setShowAskNote((v) => !v), disabled: !!aiBusy }, "\uD83D\uDCAC Ask about this note")),
-        aiError && React.createElement("p", { className: "ai-error" }, aiError),
-        summaryResult && (React.createElement("div", { className: "ai-result-box" },
-            React.createElement("p", null, summaryResult),
-            React.createElement("div", { className: "modal-actions" },
-                React.createElement("button", { className: "btn-ghost small", onClick: () => setSummaryResult("") }, "Dismiss"),
-                React.createElement("button", { className: "btn-primary small", onClick: insertSummaryIntoNote }, "Insert into note")))),
-        showAskNote && (React.createElement("div", { className: "ai-ask-box" },
-            React.createElement("div", { className: "ai-key-row" },
-                React.createElement("input", { className: "url-input", placeholder: "Ask a question about this note\u2026", value: askQuestion, onChange: (e) => setAskQuestion(e.target.value), onKeyDown: (e) => { if (e.key === "Enter")
-                        handleAskAboutNote(); }, disabled: aiBusy === "ask" }),
-                React.createElement("button", { className: "btn-primary small", onClick: handleAskAboutNote, disabled: aiBusy === "ask" || !askQuestion.trim() }, aiBusy === "ask" ? "Asking…" : "Ask")),
-            askAnswer && React.createElement("p", { className: "ai-result-box" }, askAnswer))),
-        flashcardPreview && (React.createElement("div", { className: "ai-flashcard-preview" },
-            React.createElement("p", { className: "modal-copy" },
-                flashcardPreview.length,
-                " card",
-                flashcardPreview.length === 1 ? "" : "s",
-                " generated:"),
-            flashcardPreview.map((c, i) => (React.createElement("div", { key: i, className: "ai-flashcard-item" },
-                React.createElement("strong", null, c.front),
-                React.createElement("span", null, c.back)))),
-            React.createElement("div", { className: "modal-actions" },
-                React.createElement("button", { className: "btn-ghost small", onClick: () => setFlashcardPreview(null) }, "Cancel"),
-                React.createElement("button", { className: "btn-primary small", onClick: confirmAiFlashcards },
-                    "Add all to ",
-                    subjects.find((s) => s.id === subjectId) ? subjects.find((s) => s.id === subjectId).name : "this subject")))),
-        splitPickerOpen && (React.createElement("div", { className: "split-picker-wrap" },
-            React.createElement("input", { className: "link-search-input", placeholder: "Open which note alongside this one?", value: splitPickerQuery, onChange: (e) => setSplitPickerQuery(e.target.value), autoFocus: true }),
-            splitPickerResults.length > 0 && (React.createElement("div", { className: "link-search-results" }, splitPickerResults.map((n) => (React.createElement("button", { key: n.id, className: "link-search-result", onClick: () => {
-                    onSplitWithNote(n.id);
-                    setSplitPickerOpen(false);
-                    setSplitPickerQuery("");
-                } },
-                React.createElement("span", { className: "linked-note-chip-dot", style: { background: subjectColorFor(n.subjectId) } }),
-                React.createElement("span", null, n.title),
-                React.createElement("span", { className: "link-search-result-subject" }, subjectNameFor(n.subjectId))))))))),
-        React.createElement("div", { className: "note-editor-scroll-wrap" },
-            React.createElement("div", { className: "note-editor-scroll-region", ref: scrollRegionRef, onScroll: checkScrollFade },
-                React.createElement("div", { className: "note-editor-scroll-content", ref: scrollContentRef },
-                    React.createElement("div", { className: "color-dot-row" }, NOTE_COLORS.map((c) => (React.createElement("button", { key: c.name, className: "color-dot" + (color === c.hex ? " selected" : ""), style: { background: c.hex || "var(--surface)" }, title: c.name, onClick: () => setColor(c.hex) })))),
-                    React.createElement("input", { className: "title-input", placeholder: "Title (optional)", value: title, onChange: (e) => setTitle(e.target.value) }),
-                    subjectOptions && subjectOptions.length > 1 && (React.createElement("div", { className: "subject-move-row" },
-                        React.createElement("label", { className: "field-label" }, "Subject"),
-                        React.createElement("select", { className: "parent-select", value: subjectId, onChange: (e) => setSubjectId(e.target.value) }, subjectOptions.map((s) => (React.createElement("option", { key: s.id, value: s.id }, s.label)))))),
-                    React.createElement(RichTextEditor, { initialHTML: note.bodyHTML || "", placeholder: "Write or paste your note here\u2026", onChange: setBodyHTML, onImageError: onImageError, onHighlight: note.id ? (text) => setPendingHighlight({ front: text, back: "" }) : null, onOccludeImage: note.id && onOccludeImage ? (dataUrl) => onOccludeImage(dataUrl, note.id) : null, tall: true }),
-                    React.createElement("p", { className: "hint-line" },
-                        "Tip: a line like ",
-                        React.createElement("b", null, "question :: answer"),
-                        " auto-creates a linked flashcard on save."),
-                    !note.id && (React.createElement("p", { className: "hint-line" }, "Save this note once to unlock highlight \u2192 card.")),
-                    pendingHighlight && (React.createElement("div", { className: "highlight-capture" },
-                        React.createElement("div", { className: "highlight-capture-front" },
-                            "\"",
-                            pendingHighlight.front,
-                            "\""),
-                        React.createElement("input", { autoFocus: true, placeholder: "What's the answer?", value: pendingHighlight.back, onChange: (e) => setPendingHighlight((p) => ({ ...p, back: e.target.value })), onKeyDown: (e) => e.key === "Enter" && confirmHighlightCard() }),
-                        React.createElement("div", { className: "highlight-capture-actions" },
-                            React.createElement("button", { className: "btn-ghost small", onClick: () => setPendingHighlight(null) }, "Dismiss"),
-                            React.createElement("button", { className: "btn-primary small", onClick: confirmHighlightCard, disabled: !pendingHighlight.back.trim() }, "Add card")))),
-                    React.createElement("div", { className: "image-row" },
-                        React.createElement("label", { className: "btn-ghost small file-label" },
-                            imgBusy ? "Adding…" : "+ Add image",
-                            React.createElement("input", { type: "file", accept: "image/*", multiple: true, className: "visually-hidden-file", onChange: (e) => {
-                                    addImageFiles(Array.from(e.target.files || []));
-                                    e.target.value = "";
-                                } })),
-                        React.createElement("button", { className: "btn-ghost small", onClick: () => setShowDraw(true) }, "\u270E Draw"),
-                        imgError && React.createElement("span", { className: "gen-error" }, imgError)),
-                    images.length > 0 && (React.createElement("div", { className: "image-thumbs" }, images.map((img) => (React.createElement("div", { key: img.id, className: "image-thumb-wrap" },
-                        React.createElement("img", { src: img.dataUrl, alt: "", className: "image-thumb-full", onClick: () => onViewImage && onViewImage(img.dataUrl), style: { cursor: "zoom-in" } }),
-                        React.createElement("button", { className: "image-thumb-remove", onClick: () => removeImage(img.id) }, "\u2715"),
-                        React.createElement("button", { className: "image-thumb-annotate", title: "Annotate", onClick: () => setAnnotatingThumb(img) }, "\u270E"),
-                        note.id && onOccludeImage && (React.createElement("button", { className: "image-thumb-occlude", title: "Make occlusion cards from this image", onClick: () => onOccludeImage(img.dataUrl, note.id) }, "\u25A7"))))))),
-                    annotatingThumb && (React.createElement(DrawingCanvas, { backgroundImageUrl: annotatingThumb.dataUrl, onCancel: () => setAnnotatingThumb(null), onSave: (dataUrl) => {
-                            updateImage(annotatingThumb.id, dataUrl);
-                            setAnnotatingThumb(null);
-                        } })),
-                    React.createElement("div", { className: "tag-input-row" },
-                        React.createElement("div", { className: "tag-pills-edit" },
-                            tagNames.map((t) => (React.createElement("span", { key: t, className: "tag-pill editable" },
-                                "#",
-                                t,
-                                " ",
-                                React.createElement("button", { onClick: () => removeTag(t) }, "\u2715")))),
-                            React.createElement("input", { placeholder: "Add tag, comma or enter", value: tagInput, onChange: (e) => setTagInput(e.target.value), onKeyDown: (e) => {
-                                    if (e.key === "Enter" || e.key === ",") {
-                                        e.preventDefault();
-                                        addTagFromInput();
-                                    }
-                                }, onBlur: addTagFromInput })),
-                        allTags.length > 0 && (React.createElement("div", { className: "existing-tags" }, allTags.filter((t) => !tagNames.includes(t.name)).slice(0, 8).map((t) => (React.createElement("button", { key: t.id, className: "existing-tag-btn", onClick: () => setTagNames((cur) => [...cur, t.name]) },
-                            "+",
-                            t.name)))))),
-                    React.createElement("div", { className: "link-notes-section" },
-                        React.createElement("label", { className: "field-label" }, "Link to other notes"),
-                        linkedNotes.length > 0 && (React.createElement("div", { className: "linked-note-chips" }, linkedNotes.map((n) => (React.createElement("span", { key: n.id, className: "linked-note-chip" },
-                            React.createElement("span", { className: "linked-note-chip-dot", style: { background: subjectColorFor(n.subjectId) } }),
-                            React.createElement("button", { className: "linked-note-chip-label", onClick: () => onNavigateToNote(n.id) }, n.title),
-                            React.createElement("button", { className: "linked-note-chip-remove", onClick: () => removeLink(n.id), title: "Unlink" }, "\u2715")))))),
-                        React.createElement("div", { className: "link-search-wrap" },
-                            React.createElement("input", { className: "link-search-input", placeholder: "Search notes to link\u2026", value: noteSearch, onChange: (e) => setNoteSearch(e.target.value) }),
-                            noteSearchResults.length > 0 && (React.createElement("div", { className: "link-search-results" }, noteSearchResults.map((n) => (React.createElement("button", { key: n.id, className: "link-search-result", onClick: () => addLink(n.id) },
-                                React.createElement("span", { className: "linked-note-chip-dot", style: { background: subjectColorFor(n.subjectId) } }),
-                                React.createElement("span", null, n.title),
-                                React.createElement("span", { className: "link-search-result-subject" }, subjectNameFor(n.subjectId)))))))),
-                        backlinkNotes.length > 0 && (React.createElement("div", { className: "backlinks-row" },
-                            React.createElement("label", { className: "field-label" }, "Linked from"),
-                            React.createElement("div", { className: "linked-note-chips" }, backlinkNotes.map((n) => (React.createElement("span", { key: n.id, className: "linked-note-chip readonly" },
-                                React.createElement("span", { className: "linked-note-chip-dot", style: { background: subjectColorFor(n.subjectId) } }),
-                                React.createElement("button", { className: "linked-note-chip-label", onClick: () => onNavigateToNote(n.id) }, n.title)))))))))),
-            scrollFade.top && React.createElement("div", { className: "scroll-fade scroll-fade-top" }),
-            scrollFade.bottom && React.createElement("div", { className: "scroll-fade scroll-fade-bottom" }),
-            scrollThumb.visible && (React.createElement("div", { className: "custom-scrollbar-track" },
-                React.createElement("div", { className: "custom-scrollbar-thumb", style: { top: scrollThumb.top + "%", height: scrollThumb.height + "%" } })))),
-        React.createElement("div", { className: "modal-actions" },
-            React.createElement("button", { className: "btn-ghost", onClick: onCancel }, "Cancel"),
-            React.createElement("button", { className: "btn-primary", onClick: handleSave, disabled: !htmlToPlainText(bodyHTML).trim() }, "Save note")),
-        showDraw && (React.createElement(DrawingCanvas, { onCancel: () => setShowDraw(false), onSave: (dataUrl) => {
-                setImages((cur) => [...cur, { id: uid(), dataUrl }]);
-                setShowDraw(false);
-            } }))));
-}
-// ---------- Separator-paste card import (Quizlet-style) ----------
-const TERM_SEP_OPTIONS = [
-    { label: "Tab", value: "\t" },
-    { label: "Comma", value: "," },
-    { label: "Dash ( - )", value: " - " },
-    { label: "Custom…", value: "custom" },
-];
-const CARD_SEP_OPTIONS = [
-    { label: "New line", value: "\n" },
-    { label: "Semicolon", value: ";" },
-    { label: "Custom…", value: "custom" },
-];
-function ImportCardsModal({ onCancel, onConfirm }) {
-    const [text, setText] = useState("");
-    const [termSepChoice, setTermSepChoice] = useState("\t");
-    const [termSepCustom, setTermSepCustom] = useState("");
-    const [cardSepChoice, setCardSepChoice] = useState("\n");
-    const [cardSepCustom, setCardSepCustom] = useState("");
-    const [candidates, setCandidates] = useState(null);
-    const [parseError, setParseError] = useState("");
-    const effectiveTermSep = termSepChoice === "custom" ? termSepCustom : termSepChoice;
-    const effectiveCardSep = cardSepChoice === "custom" ? cardSepCustom : cardSepChoice;
-    const handleParse = () => {
-        setParseError("");
-        if (!effectiveTermSep) {
-            setParseError("Enter a custom separator between term and definition.");
-            return;
-        }
-        if (!effectiveCardSep) {
-            setParseError("Enter a custom separator between cards.");
-            return;
-        }
-        const parsed = parseSeparatorText(text, effectiveTermSep, effectiveCardSep);
-        if (!parsed.length) {
-            setParseError("Couldn't find any term/definition pairs with those separators — check your text and separator choice.");
-            return;
-        }
-        setCandidates(parsed.map((c) => ({ ...c, id: uid() })));
-    };
-    const updateCandidate = (idx, field, value) => {
-        setCandidates((cur) => cur.map((c, i) => (i === idx ? { ...c, [field]: value } : c)));
-    };
-    const removeCandidate = (idx) => setCandidates((cur) => cur.filter((_, i) => i !== idx));
-    const handleConfirm = () => {
-        onConfirm(candidates.map(({ front, back }) => ({ front, back })));
-    };
-    return (React.createElement("div", { className: "modal-backdrop", onClick: onCancel },
-        React.createElement("div", { className: "modal wide", onClick: (e) => e.stopPropagation() },
-            React.createElement("div", { className: "modal-header" },
-                React.createElement("span", { className: "eyebrow" }, "Import cards"),
-                React.createElement("button", { className: "modal-close", onClick: onCancel }, "\u2715")),
-            candidates === null ? (React.createElement(React.Fragment, null,
-                React.createElement("p", { className: "modal-copy" }, "Paste term/definition pairs \u2014 copy straight out of a spreadsheet, doc, or a Quizlet set's export and this will split it into cards. Pick the separators that match your text."),
-                React.createElement("textarea", { className: "import-textarea", placeholder: "heart failure\treduced ability of the heart to pump blood\nafterload\tresistance the heart pumps against", value: text, onChange: (e) => setText(e.target.value) }),
-                React.createElement("div", { className: "sep-row" },
-                    React.createElement("div", { className: "sep-field" },
-                        React.createElement("label", null, "Between term and definition"),
-                        React.createElement("select", { value: termSepChoice, onChange: (e) => setTermSepChoice(e.target.value) }, TERM_SEP_OPTIONS.map((o) => React.createElement("option", { key: o.value, value: o.value }, o.label))),
-                        termSepChoice === "custom" && (React.createElement("input", { placeholder: "e.g. ::", value: termSepCustom, onChange: (e) => setTermSepCustom(e.target.value) }))),
-                    React.createElement("div", { className: "sep-field" },
-                        React.createElement("label", null, "Between cards"),
-                        React.createElement("select", { value: cardSepChoice, onChange: (e) => setCardSepChoice(e.target.value) }, CARD_SEP_OPTIONS.map((o) => React.createElement("option", { key: o.value, value: o.value }, o.label))),
-                        cardSepChoice === "custom" && (React.createElement("input", { placeholder: "e.g. |||", value: cardSepCustom, onChange: (e) => setCardSepCustom(e.target.value) })))),
-                parseError && React.createElement("div", { className: "gen-error" }, parseError),
-                React.createElement("div", { className: "modal-actions" },
-                    React.createElement("button", { className: "btn-ghost", onClick: onCancel }, "Cancel"),
-                    React.createElement("button", { className: "btn-primary", onClick: handleParse, disabled: !text.trim() }, "Split into cards")))) : (React.createElement(React.Fragment, null,
-                React.createElement("p", { className: "modal-copy" },
-                    "Found ",
-                    candidates.length,
-                    " card",
-                    candidates.length === 1 ? "" : "s",
-                    " \u2014 review, edit, or discard before adding."),
-                React.createElement("div", { className: "candidate-list" },
-                    candidates.map((c, i) => (React.createElement("div", { key: c.id, className: "candidate-row" },
-                        React.createElement("textarea", { className: "candidate-front", value: c.front, onChange: (e) => updateCandidate(i, "front", e.target.value) }),
-                        React.createElement("textarea", { className: "candidate-back", value: c.back, onChange: (e) => updateCandidate(i, "back", e.target.value) }),
-                        React.createElement("button", { className: "candidate-remove", onClick: () => removeCandidate(i) }, "\u2715")))),
-                    candidates.length === 0 && React.createElement("p", { className: "modal-copy" }, "All cards discarded.")),
-                React.createElement("div", { className: "modal-actions" },
-                    React.createElement("button", { className: "btn-ghost", onClick: () => setCandidates(null) }, "Back"),
-                    React.createElement("button", { className: "btn-primary", onClick: handleConfirm, disabled: candidates.length === 0 },
-                        "Add ",
-                        candidates.length,
-                        " card",
-                        candidates.length === 1 ? "" : "s",
-                        " to deck")))))));
-}
-// ---------- Card editor ----------
-function CardEditor({ card, onCancel, onSave }) {
-    const isOcclusion = !!card.frontImage;
-    const [front, setFront] = useState(card.front);
-    const [back, setBack] = useState(card.back);
-    return (React.createElement("div", { className: "modal-backdrop", onClick: onCancel },
-        React.createElement("div", { className: "modal", onClick: (e) => e.stopPropagation() },
-            React.createElement("div", { className: "modal-header" },
-                React.createElement("span", { className: "eyebrow" }, "Edit card"),
-                React.createElement("button", { className: "modal-close", onClick: onCancel }, "\u2715")),
-            isOcclusion ? (React.createElement(React.Fragment, null,
-                React.createElement("label", { className: "field-label" }, "Question (image)"),
-                React.createElement("img", { src: card.frontImage, alt: "", className: "card-editor-thumb" }))) : (React.createElement(React.Fragment, null,
-                React.createElement("label", { className: "field-label" }, "Question"),
-                React.createElement("textarea", { className: "candidate-front", value: front, onChange: (e) => setFront(e.target.value) }))),
-            React.createElement("label", { className: "field-label" }, isOcclusion ? "Label" : "Answer"),
-            React.createElement("textarea", { className: "candidate-back", value: back, onChange: (e) => setBack(e.target.value) }),
-            React.createElement("div", { className: "modal-actions" },
-                React.createElement("button", { className: "btn-ghost", onClick: onCancel }, "Cancel"),
-                React.createElement("button", { className: "btn-primary", disabled: (!isOcclusion && !front.trim()) || !back.trim(), onClick: () => onSave(card.id, isOcclusion ? card.front : front.trim(), back.trim()) }, "Save card")))));
-}
-// ---------- Study panel ----------
-function StudyPanel({ subject, notes, cards, dueCount, missedCount, points, onImport, onReview, onMatch, onOcclusion, onToggleStar, onDelete, onEdit, scope, onScopeChange, notesWithCards, noteFilter, onNoteFilterChange, selectedCardIds, onToggleCardSelect, onClearSelection, }) {
-    const [sortBy, setSortBy] = useState("due"); // "due" | "box" | "newest" | "az"
-    const starredCount = cards.filter((c) => c.starred).length;
-    const selectedVisibleCount = cards.filter((c) => selectedCardIds.has(c.id)).length;
-    const activeCount = scope === "starred" ? starredCount :
-        scope === "all" ? cards.length :
-            scope === "selected" ? selectedVisibleCount :
-                dueCount;
-    const sortedCards = useMemo(() => {
-        const arr = [...cards];
-        if (sortBy === "due")
-            arr.sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
-        else if (sortBy === "box")
-            arr.sort((a, b) => a.box - b.box);
-        else if (sortBy === "newest")
-            arr.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-        else if (sortBy === "az")
-            arr.sort((a, b) => a.front.localeCompare(b.front));
-        return arr;
-    }, [cards, sortBy]);
-    const allVisibleSelected = cards.length > 0 && cards.every((c) => selectedCardIds.has(c.id));
-    const selectAllVisible = () => cards.forEach((c) => { if (!selectedCardIds.has(c.id))
-        onToggleCardSelect(c.id); });
-    return (React.createElement("div", { className: "study-panel" },
-        React.createElement("div", { className: "deck-meta-line" },
-            React.createElement("span", { className: "deck-count" },
-                cards.length,
-                " card",
-                cards.length === 1 ? "" : "s"),
-            React.createElement("span", { className: "deck-dot" }, "\u00B7"),
-            React.createElement("span", { className: "deck-subject-tag" }, subject.name)),
-        React.createElement("div", { className: "study-stats" },
-            React.createElement("div", { className: "stat" },
-                React.createElement("span", { className: "stat-value" }, dueCount),
-                React.createElement("span", { className: "stat-label" }, "due now")),
-            React.createElement("div", { className: "stat" },
-                React.createElement("span", { className: "stat-value" }, cards.length),
-                React.createElement("span", { className: "stat-label" }, "total cards")),
-            React.createElement("div", { className: "stat" },
-                React.createElement("span", { className: "stat-value" }, missedCount),
-                React.createElement("span", { className: "stat-label" }, "need review")),
-            React.createElement("div", { className: "stat" },
-                React.createElement("span", { className: "stat-value" }, points),
-                React.createElement("span", { className: "stat-label" }, "points"))),
-        React.createElement("div", { className: "study-mode-row" },
-            React.createElement("button", { className: "mode-tile" + (activeCount === 0 ? " disabled" : ""), style: { "--mode-accent": subject.color }, onClick: onReview, disabled: activeCount === 0 },
-                React.createElement("span", { className: "mode-tile-icon" }, "\u25A4"),
-                React.createElement("span", { className: "mode-tile-label" }, "Cards")),
-            React.createElement("button", { className: "mode-tile" + (activeCount < 4 ? " disabled" : ""), style: { "--mode-accent": subject.color }, onClick: onMatch, disabled: activeCount < 4 },
-                React.createElement("span", { className: "mode-tile-icon" }, "\u26AD"),
-                React.createElement("span", { className: "mode-tile-label" }, "Match")),
-            "        ",
-            React.createElement("button", { className: "mode-tile", style: { "--mode-accent": subject.color }, onClick: onImport },
-                React.createElement("span", { className: "mode-tile-icon" }, "+"),
-                React.createElement("span", { className: "mode-tile-label" }, "Import")),
-            React.createElement("button", { className: "mode-tile", style: { "--mode-accent": subject.color }, onClick: onOcclusion },
-                React.createElement("span", { className: "mode-tile-icon" }, "\u25A7"),
-                React.createElement("span", { className: "mode-tile-label" }, "Occlude"))),
-        React.createElement("div", { className: "scope-toggle" },
-            React.createElement("button", { className: "scope-btn" + (scope === "due" ? " active" : ""), onClick: () => onScopeChange("due") },
-                "Due (",
-                dueCount,
-                ")"),
-            React.createElement("button", { className: "scope-btn" + (scope === "starred" ? " active" : ""), onClick: () => onScopeChange("starred") },
-                "Starred (",
-                starredCount,
-                ")"),
-            React.createElement("button", { className: "scope-btn" + (scope === "all" ? " active" : ""), onClick: () => onScopeChange("all") },
-                "All (",
-                cards.length,
-                ")"),
-            selectedCardIds.size > 0 && (React.createElement("button", { className: "scope-btn" + (scope === "selected" ? " active" : ""), onClick: () => onScopeChange("selected") },
-                "Selected (",
-                selectedVisibleCount,
-                ")"))),
-        notesWithCards.length > 0 && (React.createElement("div", { className: "study-filter-row" },
-            React.createElement("label", { className: "field-label" }, "Study one note"),
-            React.createElement("select", { className: "parent-select", value: noteFilter || "", onChange: (e) => onNoteFilterChange(e.target.value || null) },
-                React.createElement("option", { value: "" }, "All notes in this subject"),
-                notesWithCards.map((n) => (React.createElement("option", { key: n.id, value: n.id }, n.title)))))),
-        cards.length === 0 && (React.createElement("p", { className: "study-hint" }, "No cards yet \u2014 tap Import to paste term/definition pairs, or highlight text in a note to create one.")),
-        cards.length > 0 && activeCount === 0 && (React.createElement("p", { className: "study-hint" }, scope === "selected" ? "Nothing selected yet — check a few cards below." : `No cards in this scope yet — try "All", or star a few cards.`)),
-        cards.length > 0 && (React.createElement(React.Fragment, null,
-            React.createElement("div", { className: "term-table-toolbar" },
-                React.createElement("div", { className: "term-select-controls" },
-                    React.createElement("button", { className: "btn-ghost small", onClick: allVisibleSelected ? onClearSelection : selectAllVisible }, allVisibleSelected ? "Clear selection" : "Select all shown"),
-                    selectedCardIds.size > 0 && React.createElement("span", { className: "term-select-count" },
-                        selectedCardIds.size,
-                        " selected")),
-                React.createElement("div", { className: "sort-field" },
-                    React.createElement("label", { className: "field-label" }, "Sort"),
-                    React.createElement("select", { value: sortBy, onChange: (e) => setSortBy(e.target.value) },
-                        React.createElement("option", { value: "due" }, "Due soonest"),
-                        React.createElement("option", { value: "box" }, "Weakest first (box)"),
-                        React.createElement("option", { value: "newest" }, "Newest first"),
-                        React.createElement("option", { value: "az" }, "A\u2013Z")))),
-            React.createElement("div", { className: "term-table" }, sortedCards.map((c) => (React.createElement("div", { key: c.id, className: "term-row" + (selectedCardIds.has(c.id) ? " selected" : "") },
-                React.createElement("input", { type: "checkbox", className: "term-checkbox", checked: selectedCardIds.has(c.id), onChange: () => onToggleCardSelect(c.id) }),
-                React.createElement("div", { className: "term-front", onClick: () => onEdit(c) }, c.frontImage ? React.createElement("img", { src: c.frontImage, alt: "", className: "term-thumb" }) : c.front),
-                React.createElement("div", { className: "term-back", onClick: () => onEdit(c) }, c.back),
-                React.createElement("div", { className: "term-actions" },
-                    React.createElement("span", { className: "box-badge box-" + c.box },
-                        "box ",
-                        c.box),
-                    React.createElement("button", { className: "star-btn" + (c.starred ? " starred" : ""), title: c.starred ? "Unstar" : "Star to always review", onClick: () => onToggleStar(c.id) }, c.starred ? "★" : "☆"),
-                    React.createElement("button", { title: "Edit card", onClick: () => onEdit(c) }, "\u270E"),
-                    React.createElement("button", { title: "Delete card", onClick: () => onDelete(c.id) }, "\u2715"))))))))));
-}
-// ---------- Review session (flip cards) ----------
-function ReviewSessionInner({ cards, onAnswer, onToggleStar, onClose, compact }) {
-    const [order] = useState(() => [...cards].sort(() => Math.random() - 0.5));
-    const [index, setIndex] = useState(0);
-    const [flipped, setFlipped] = useState(false);
-    const [correct, setCorrect] = useState(0);
-    const [missed, setMissed] = useState(0);
-    const [starredIds, setStarredIds] = useState(() => new Set(cards.filter((c) => c.starred).map((c) => c.id)));
-    const current = order[index];
-    const done = index >= order.length;
-    const handleAnswer = async (isCorrect) => {
-        if (!current)
-            return;
-        await onAnswer(current.id, isCorrect);
-        if (isCorrect)
-            setCorrect((c) => c + 1);
-        else
-            setMissed((m) => m + 1);
-        setFlipped(false);
-        setIndex((i) => i + 1);
-    };
-    const handleStar = () => {
-        if (!current)
-            return;
-        onToggleStar(current.id);
-        setStarredIds((cur) => {
-            const next = new Set(cur);
-            if (next.has(current.id))
-                next.delete(current.id);
-            else
-                next.add(current.id);
-            return next;
-        });
-    };
-    useEffect(() => {
-        // A compact review embedded in a split pane shouldn't hijack the whole
-        // page's keyboard input — only the full-screen version gets shortcuts.
-        if (compact)
-            return;
-        const handleKey = (e) => {
-            if (done || !current)
-                return;
-            if (e.key === " " || e.key === "Enter") {
-                e.preventDefault();
-                if (!flipped)
-                    setFlipped(true);
-                else
-                    handleAnswer(true);
-            }
-            else if (flipped && (e.key === "ArrowRight" || e.key === "2")) {
-                e.preventDefault();
-                handleAnswer(true);
-            }
-            else if (flipped && (e.key === "ArrowLeft" || e.key === "1")) {
-                e.preventDefault();
-                handleAnswer(false);
-            }
-            else if (e.key === "s" || e.key === "S") {
-                e.preventDefault();
-                handleStar();
-            }
-            else if (e.key === "Escape") {
-                onClose();
-            }
-        };
-        window.addEventListener("keydown", handleKey);
-        return () => window.removeEventListener("keydown", handleKey);
-    }, [flipped, done, current, compact]);
-    if (order.length === 0) {
-        return (React.createElement(React.Fragment, null,
-            React.createElement("p", { className: "modal-copy" }, "No cards due right now."),
-            React.createElement("div", { className: "modal-actions" },
-                React.createElement("button", { className: "btn-primary", onClick: onClose }, "Close"))));
-    }
-    return (React.createElement(React.Fragment, null, done ? (React.createElement(React.Fragment, null,
-        React.createElement("div", { className: "eyebrow" }, "Session complete"),
-        React.createElement("h2", { className: "review-summary-title" },
-            correct,
-            " / ",
-            order.length,
-            " correct"),
-        React.createElement("p", { className: "modal-copy" }, missed > 0 ? `${missed} card${missed === 1 ? "" : "s"} sent back to box 1 for another pass.` : "Clean sweep."),
-        React.createElement("div", { className: "modal-actions" },
-            React.createElement("button", { className: "btn-primary", onClick: onClose }, "Done")))) : (React.createElement(React.Fragment, null,
-        React.createElement("div", { className: "review-progress" },
-            index + 1,
-            " / ",
-            order.length),
-        React.createElement("div", { className: "flip-card" + (flipped ? " is-flipped" : "") + (compact ? " compact" : ""), onClick: () => setFlipped((f) => !f) },
-            React.createElement("button", { className: "review-star" + (starredIds.has(current.id) ? " starred" : ""), onClick: (e) => { e.stopPropagation(); handleStar(); }, title: starredIds.has(current.id) ? "Unstar" : "Star this card" }, starredIds.has(current.id) ? "★" : "☆"),
-            React.createElement("div", { className: "flip-card-label" }, flipped ? "Answer" : "Question"),
-            flipped ? (React.createElement(React.Fragment, null,
-                current.backImage && React.createElement("img", { src: current.backImage, alt: "", className: "flip-card-image" }),
-                current.back && React.createElement("div", { className: "flip-card-text" }, current.back))) : current.frontImage ? (React.createElement("img", { src: current.frontImage, alt: "", className: "flip-card-image" })) : (React.createElement("div", { className: "flip-card-text" }, current.front)),
-            !flipped && React.createElement("div", { className: "flip-hint" }, "Tap to reveal")),
-        flipped ? (React.createElement("div", { className: "answer-actions" },
-            React.createElement("button", { className: "btn-ghost danger", onClick: () => handleAnswer(false) }, "Missed it"),
-            React.createElement("button", { className: "btn-primary", onClick: () => handleAnswer(true) }, "Got it"))) : (React.createElement("div", { className: "modal-actions" },
-            React.createElement("button", { className: "btn-ghost", onClick: onClose }, compact ? "Back to list" : "Stop for now"))),
-        !compact && React.createElement("p", { className: "keyboard-hint" }, "Space flip \u00B7 \u2190 missed \u00B7 \u2192 got it \u00B7 S star")))));
-}
-function ReviewSession({ cards, onAnswer, onToggleStar, onClose }) {
-    return (React.createElement("div", { className: "modal-backdrop" },
-        React.createElement("div", { className: "modal review-modal" },
-            React.createElement(ReviewSessionInner, { cards: cards, onAnswer: onAnswer, onToggleStar: onToggleStar, onClose: onClose }))));
-}
-// ---------- Split-pane flashcards (view + study a note's cards alongside it) ----------
-function SplitCardsPanel({ cards, scope, onScopeChange, noteTitle, subjectTitle, onClose, onEditCard, onToggleStar, onDeleteCard, onStudy }) {
-    return (React.createElement("div", { className: "note-editor-pane split cards-pane" },
-        React.createElement("div", { className: "modal-header" },
-            React.createElement("span", { className: "eyebrow" }, "Flashcards"),
-            React.createElement("button", { className: "modal-close", onClick: onClose }, "\u2715 Close pane")),
-        React.createElement("div", { className: "note-editor-scroll-region" },
-            React.createElement("div", { className: "scope-toggle" },
-                React.createElement("button", { className: "scope-btn" + (scope === "note" ? " active" : ""), onClick: () => onScopeChange("note") },
-                    "This note",
-                    noteTitle ? `: ${noteTitle}` : ""),
-                React.createElement("button", { className: "scope-btn" + (scope === "subject" ? " active" : ""), onClick: () => onScopeChange("subject") },
-                    "Whole subject",
-                    subjectTitle ? `: ${subjectTitle}` : "")),
-            React.createElement("div", { className: "deck-meta-line" },
-                React.createElement("span", { className: "deck-count" },
-                    cards.length,
-                    " card",
-                    cards.length === 1 ? "" : "s")),
-            React.createElement("button", { className: "btn-primary", disabled: cards.length === 0, onClick: onStudy }, "Study these"),
-            React.createElement("div", { className: "split-cards-list" },
-                cards.length === 0 && (React.createElement("p", { className: "study-hint" }, "No cards yet \u2014 highlight text or write a \"question :: answer\" line in the note to create one.")),
-                cards.map((c) => (React.createElement("div", { key: c.id, className: "term-row" },
-                    React.createElement("div", { className: "term-front", onClick: () => onEditCard(c) }, c.frontImage ? React.createElement("img", { src: c.frontImage, alt: "", className: "term-thumb" }) : c.front),
-                    React.createElement("div", { className: "term-back", onClick: () => onEditCard(c) }, c.back),
-                    React.createElement("div", { className: "term-actions" },
-                        React.createElement("span", { className: "box-badge box-" + c.box },
-                            "box ",
-                            c.box),
-                        React.createElement("button", { className: "star-btn" + (c.starred ? " starred" : ""), onClick: () => onToggleStar(c.id) }, c.starred ? "★" : "☆"),
-                        React.createElement("button", { title: "Edit card", onClick: () => onEditCard(c) }, "\u270E"),
-                        React.createElement("button", { title: "Delete card", onClick: () => onDeleteCard(c.id) }, "\u2715")))))))));
-}
-// ---------- Match game ----------
-function MatchGame({ cards, onClose }) {
-    // Image-occlusion cards don't have front text, so they don't fit the
-    // text-tile matching format — leave them out of the round pool entirely.
-    const matchableCards = useMemo(() => cards.filter((c) => !c.frontImage), [cards]);
-    const roundCards = useMemo(() => {
-        const shuffled = [...matchableCards].sort(() => Math.random() - 0.5);
-        return shuffled.slice(0, Math.min(8, shuffled.length));
-    }, [matchableCards]);
-    const [tiles] = useState(() => {
-        const t = [];
-        roundCards.forEach((c) => {
-            t.push({ id: c.id + "-f", cardId: c.id, text: c.front });
-            t.push({ id: c.id + "-b", cardId: c.id, text: c.back });
-        });
-        return t.sort(() => Math.random() - 0.5);
+
+function NoteEditor({
+  note,
+  allTags,
+  existingTagIds,
+  tagName,
+  subjectOptions,
+  currentSubjectId,
+  allNotes,
+  subjects,
+  onCancel,
+  onSave,
+  onCreateCard,
+  onOccludeImage,
+  onViewImage,
+  onNavigateToNote,
+  onSplitWithNote,
+  onSplitWithCards,
+  isSplitPane,
+  onImageError
+}) {
+  const [title, setTitle] = useState(note.title || "");
+  const [bodyHTML, setBodyHTML] = useState(note.bodyHTML || "");
+  const [tagInput, setTagInput] = useState("");
+  const [tagNames, setTagNames] = useState(existingTagIds.map(tagName).filter(Boolean));
+  const [images, setImages] = useState(note.images || []);
+  const [color, setColor] = useState(note.color || null);
+  const [subjectId, setSubjectId] = useState(note.subjectId || currentSubjectId || "");
+  const [linkedNoteIds, setLinkedNoteIds] = useState(note.linkedNoteIds || []);
+  const [noteSearch, setNoteSearch] = useState("");
+  const [splitMenuOpen, setSplitMenuOpen] = useState(false);
+  const scrollRegionRef = useRef(null);
+  const scrollContentRef = useRef(null);
+  const [scrollFade, setScrollFade] = useState({
+    top: false,
+    bottom: false
+  });
+  const [scrollThumb, setScrollThumb] = useState({
+    visible: false,
+    top: 0,
+    height: 20
+  });
+  const [saveMessage, setSaveMessage] = useState(""); // shown when a save fails, so a failed Save is never silent
+
+  const checkScrollFade = () => {
+    const el = scrollRegionRef.current;
+    if (!el) return;
+    const {
+      scrollTop,
+      scrollHeight,
+      clientHeight
+    } = el;
+    setScrollFade({
+      top: scrollTop > 2,
+      bottom: scrollTop + clientHeight < scrollHeight - 2
     });
-    const [selected, setSelected] = useState([]);
-    const [matchedCardIds, setMatchedCardIds] = useState(() => new Set());
-    const [wrongIds, setWrongIds] = useState([]);
-    const [seconds, setSeconds] = useState(0);
-    const [running, setRunning] = useState(true);
-    useEffect(() => {
-        if (!running)
-            return;
-        const id = setInterval(() => setSeconds((s) => s + 1), 1000);
-        return () => clearInterval(id);
-    }, [running]);
-    const done = matchedCardIds.size === roundCards.length && roundCards.length > 0;
-    useEffect(() => { if (done)
-        setRunning(false); }, [done]);
-    const handleTap = (tile) => {
-        if (matchedCardIds.has(tile.cardId))
-            return;
-        if (selected.some((s) => s.id === tile.id))
-            return;
-        if (selected.length === 0) {
-            setSelected([tile]);
-            return;
-        }
-        if (selected.length === 1) {
-            const first = selected[0];
-            if (first.cardId === tile.cardId) {
-                setMatchedCardIds((cur) => new Set([...cur, tile.cardId]));
-                setSelected([]);
-            }
-            else {
-                setWrongIds([first.id, tile.id]);
-                setTimeout(() => { setWrongIds([]); setSelected([]); }, 600);
-                setSelected([first, tile]);
-            }
-        }
-    };
-    if (roundCards.length === 0) {
-        return (React.createElement("div", { className: "modal-backdrop", onClick: onClose },
-            React.createElement("div", { className: "modal", onClick: (e) => e.stopPropagation() },
-                React.createElement("p", { className: "modal-copy" }, cards.length > 0 && matchableCards.length === 0
-                    ? "These cards are all image-occlusion cards, which don't fit the Match format — try Cards mode instead."
-                    : "No cards available to match right now."),
-                React.createElement("div", { className: "modal-actions" },
-                    React.createElement("button", { className: "btn-primary", onClick: onClose }, "Close")))));
+    // A real, always-visible scrollbar thumb — built from a plain DOM
+    // element we position ourselves, not the browser's native scrollbar.
+    // Mobile browsers won't let a page force their native scrollbar to
+    // stay visible, but there's nothing stopping a page from drawing its
+    // own — this is that.
+    if (scrollHeight <= clientHeight + 2) {
+      setScrollThumb({
+        visible: false,
+        top: 0,
+        height: 20
+      });
+    } else {
+      const thumbHeightPct = Math.max(10, clientHeight / scrollHeight * 100);
+      const maxScroll = scrollHeight - clientHeight;
+      const scrollRatio = maxScroll > 0 ? scrollTop / maxScroll : 0;
+      const thumbTopPct = scrollRatio * (100 - thumbHeightPct);
+      setScrollThumb({
+        visible: true,
+        top: thumbTopPct,
+        height: thumbHeightPct
+      });
     }
-    return (React.createElement("div", { className: "modal-backdrop" },
-        React.createElement("div", { className: "modal wide" },
-            React.createElement("div", { className: "modal-header" },
-                React.createElement("span", { className: "eyebrow" }, "Match"),
-                React.createElement("span", { className: "match-timer" },
-                    seconds,
-                    "s"),
-                React.createElement("button", { className: "modal-close", onClick: onClose }, "\u2715")),
-            done ? (React.createElement(React.Fragment, null,
-                React.createElement("h2", { className: "review-summary-title" },
-                    "Matched in ",
-                    seconds,
-                    "s"),
-                React.createElement("div", { className: "modal-actions" },
-                    React.createElement("button", { className: "btn-primary", onClick: onClose }, "Done")))) : (React.createElement("div", { className: "match-grid" }, tiles.map((tile) => {
-                const matched = matchedCardIds.has(tile.cardId);
-                const isSelected = selected.some((s) => s.id === tile.id);
-                const isWrong = wrongIds.includes(tile.id);
-                return (React.createElement("div", { key: tile.id, className: "match-tile" + (matched ? " matched" : "") + (isSelected ? " selected" : "") + (isWrong ? " wrong" : ""), onClick: () => handleTap(tile) }, tile.text));
-            }))))));
+  };
+
+  // Belt-and-suspenders: regardless of where focus/cursor placement might
+  // otherwise leave the scroll position, opening a note always starts by
+  // showing its top — title, subject, and the beginning of the text.
+  useEffect(() => {
+    if (scrollRegionRef.current) scrollRegionRef.current.scrollTop = 0;
+    checkScrollFade();
+    window.addEventListener("resize", checkScrollFade);
+    return () => window.removeEventListener("resize", checkScrollFade);
+  }, []);
+
+  // The scroll-fade/scrollbar state above only gets recomputed when
+  // something explicitly asks it to. That misses real cases — an image
+  // finishing an async load, a drawing added via the separate `images`
+  // state, a font loading — anything that changes the note's actual
+  // rendered height without touching bodyHTML. A ResizeObserver on the
+  // actual content (not the scroll container, which is a fixed height by
+  // the flex layout and wouldn't report this) catches all of these
+  // uniformly, regardless of what caused the growth.
+  useEffect(() => {
+    if (typeof ResizeObserver === "undefined" || !scrollContentRef.current) return;
+    const observer = new ResizeObserver(() => checkScrollFade());
+    observer.observe(scrollContentRef.current);
+    return () => observer.disconnect();
+  }, []);
+
+  // Content grows as you type or insert images — keep the "more below" hint
+  // honest even without an actual scroll event happening.
+  useEffect(() => {
+    checkScrollFade();
+  }, [bodyHTML]);
+  const [splitPickerOpen, setSplitPickerOpen] = useState(false);
+  const [splitPickerQuery, setSplitPickerQuery] = useState("");
+  const [imgBusy, setImgBusy] = useState(false);
+  const [imgError, setImgError] = useState("");
+  const [showDraw, setShowDraw] = useState(false);
+  const [pendingHighlight, setPendingHighlight] = useState(null); // { front, back } | null
+
+  const addTagFromInput = () => {
+    const parts = tagInput.split(",").map(p => p.trim()).filter(Boolean);
+    if (!parts.length) return;
+    setTagNames(cur => [...new Set([...cur, ...parts])]);
+    setTagInput("");
+  };
+  const removeTag = name => setTagNames(cur => cur.filter(t => t !== name));
+  const addImageFiles = async files => {
+    if (!files.length) return;
+    setImgBusy(true);
+    setImgError("");
+    try {
+      const compressed = await Promise.all(files.map(f => compressImage(f)));
+      setImages(cur => [...cur, ...compressed.map(dataUrl => ({
+        id: uid(),
+        dataUrl
+      }))]);
+    } catch (e) {
+      setImgError("Couldn't add that image — try a different file.");
+    } finally {
+      setImgBusy(false);
+    }
+  };
+  const removeImage = id => setImages(cur => cur.filter(img => img.id !== id));
+  const updateImage = (id, dataUrl) => setImages(cur => cur.map(img => img.id === id ? {
+    ...img,
+    dataUrl
+  } : img));
+  const [annotatingThumb, setAnnotatingThumb] = useState(null); // { id, dataUrl } | null
+
+  const subjectNameFor = sid => (subjects || []).find(s => s.id === sid)?.name || "";
+  const subjectColorFor = sid => (subjects || []).find(s => s.id === sid)?.color || "#6C5CE7";
+  const noteSearchResults = useMemo(() => {
+    const q = noteSearch.trim().toLowerCase();
+    if (!q) return [];
+    return (allNotes || []).filter(n => n.id !== note.id && !linkedNoteIds.includes(n.id) && n.title.toLowerCase().includes(q)).slice(0, 8);
+  }, [noteSearch, allNotes, note.id, linkedNoteIds]);
+  const splitPickerResults = useMemo(() => {
+    const q = splitPickerQuery.trim().toLowerCase();
+    const base = allNotes || [];
+    if (!q) return base.slice(0, 8);
+    return base.filter(n => n.title.toLowerCase().includes(q)).slice(0, 8);
+  }, [splitPickerQuery, allNotes]);
+  const linkedNotes = linkedNoteIds.map(id => (allNotes || []).find(n => n.id === id)).filter(Boolean); // silently drops dangling references (e.g. the linked note was deleted)
+
+  const backlinkNotes = note.id ? (allNotes || []).filter(n => n.id !== note.id && (n.linkedNoteIds || []).includes(note.id)) : [];
+  const addLink = noteId => {
+    setLinkedNoteIds(cur => [...new Set([...cur, noteId])]);
+    setNoteSearch("");
+  };
+  const removeLink = noteId => setLinkedNoteIds(cur => cur.filter(id => id !== noteId));
+  const handleSave = async () => {
+    if (!noteHasContent(title, bodyHTML, images)) return;
+    // onSave is async; without this try/catch a failure here would be a silently
+    // swallowed promise rejection — the tap would look like it did nothing at all.
+    try {
+      await onSave({
+        title: title.trim(),
+        bodyHTML,
+        tagNames,
+        images,
+        color,
+        subjectId,
+        linkedNoteIds
+      });
+    } catch (e) {
+      setSaveMessage(`Couldn't save: ${e && e.message ? e.message : e}`);
+    }
+  };
+  const confirmHighlightCard = () => {
+    if (!pendingHighlight || !pendingHighlight.back.trim() || !note.id) return;
+    onCreateCard(note.id, pendingHighlight.front, pendingHighlight.back.trim());
+    setPendingHighlight(null);
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    className: "note-editor-pane" + (isSplitPane ? " split" : ""),
+    style: {
+      background: color || "var(--surface)",
+      "--note-ink": color ? "#241C3D" : undefined,
+      "--note-muted": color ? "rgba(36,28,61,0.65)" : undefined,
+      "--note-bg": color || "var(--surface)"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal-header"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "eyebrow"
+  }, note.id ? "Edit note" : "New note"), /*#__PURE__*/React.createElement("div", {
+    className: "note-editor-header-actions"
+  }, !isSplitPane && note.id && (onSplitWithCards || onSplitWithNote) && /*#__PURE__*/React.createElement("div", {
+    className: "split-menu-wrap"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small",
+    onClick: () => setSplitMenuOpen(v => !v)
+  }, "+ Split view"), splitMenuOpen && /*#__PURE__*/React.createElement("div", {
+    className: "split-menu"
+  }, onSplitWithCards && /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      onSplitWithCards(note.id, note.subjectId);
+      setSplitMenuOpen(false);
+    }
+  }, "\u25A4 This note's flashcards", /*#__PURE__*/React.createElement("span", {
+    className: "split-menu-desc"
+  }, "See and study cards made from this note")), onSplitWithNote && note.id && /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      onSplitWithNote(note.id);
+      setSplitMenuOpen(false);
+    }
+  }, "\uD83D\uDCC4 This note (side by side)", /*#__PURE__*/React.createElement("span", {
+    className: "split-menu-desc"
+  }, "View or edit two places in the same note at once")), onSplitWithNote && /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setSplitMenuOpen(false);
+      setSplitPickerOpen(true);
+    }
+  }, "\uD83D\uDCDD Another note", /*#__PURE__*/React.createElement("span", {
+    className: "split-menu-desc"
+  }, "Open a different note side by side")))), /*#__PURE__*/React.createElement("button", {
+    className: "modal-close",
+    onClick: onCancel
+  }, isSplitPane ? "✕ Close pane" : "✕"))), saveMessage && /*#__PURE__*/React.createElement("p", {
+    className: "note-error"
+  }, saveMessage), splitPickerOpen && /*#__PURE__*/React.createElement("div", {
+    className: "split-picker-wrap"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "link-search-input",
+    placeholder: "Open which note alongside this one?",
+    value: splitPickerQuery,
+    onChange: e => setSplitPickerQuery(e.target.value),
+    autoFocus: true
+  }), splitPickerResults.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "link-search-results"
+  }, splitPickerResults.map(n => /*#__PURE__*/React.createElement("button", {
+    key: n.id,
+    className: "link-search-result",
+    onClick: () => {
+      onSplitWithNote(n.id);
+      setSplitPickerOpen(false);
+      setSplitPickerQuery("");
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "linked-note-chip-dot",
+    style: {
+      background: subjectColorFor(n.subjectId)
+    }
+  }), /*#__PURE__*/React.createElement("span", null, n.title), /*#__PURE__*/React.createElement("span", {
+    className: "link-search-result-subject"
+  }, subjectNameFor(n.subjectId)))))), /*#__PURE__*/React.createElement("div", {
+    className: "note-editor-scroll-wrap"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "note-editor-scroll-region",
+    ref: scrollRegionRef,
+    onScroll: checkScrollFade
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "note-editor-scroll-content",
+    ref: scrollContentRef
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "color-dot-row"
+  }, NOTE_COLORS.map(c => /*#__PURE__*/React.createElement("button", {
+    key: c.name,
+    className: "color-dot" + (color === c.hex ? " selected" : ""),
+    style: {
+      background: c.hex || "var(--surface)"
+    },
+    title: c.name,
+    onClick: () => setColor(c.hex)
+  }))), /*#__PURE__*/React.createElement("input", {
+    className: "title-input",
+    placeholder: "Title (optional)",
+    value: title,
+    onChange: e => setTitle(e.target.value)
+  }), subjectOptions && subjectOptions.length > 1 && /*#__PURE__*/React.createElement("div", {
+    className: "subject-move-row"
+  }, /*#__PURE__*/React.createElement("label", {
+    className: "field-label"
+  }, "Subject"), /*#__PURE__*/React.createElement("select", {
+    className: "parent-select",
+    value: subjectId,
+    onChange: e => setSubjectId(e.target.value)
+  }, subjectOptions.map(s => /*#__PURE__*/React.createElement("option", {
+    key: s.id,
+    value: s.id
+  }, s.label)))), /*#__PURE__*/React.createElement(RichTextEditor, {
+    initialHTML: note.bodyHTML || "",
+    placeholder: "Write or paste your note here\u2026",
+    onChange: setBodyHTML,
+    onImageError: onImageError,
+    onHighlight: note.id ? text => setPendingHighlight({
+      front: text,
+      back: ""
+    }) : null,
+    onOccludeImage: note.id && onOccludeImage ? dataUrl => onOccludeImage(dataUrl, note.id) : null,
+    tall: true
+  }), /*#__PURE__*/React.createElement("p", {
+    className: "hint-line"
+  }, "Tip: a line like ", /*#__PURE__*/React.createElement("b", null, "question :: answer"), " auto-creates a linked flashcard on save."), !note.id && /*#__PURE__*/React.createElement("p", {
+    className: "hint-line"
+  }, "Save this note once to unlock highlight \u2192 card."), pendingHighlight && /*#__PURE__*/React.createElement("div", {
+    className: "highlight-capture"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "highlight-capture-front"
+  }, "\"", pendingHighlight.front, "\""), /*#__PURE__*/React.createElement("input", {
+    autoFocus: true,
+    placeholder: "What's the answer?",
+    value: pendingHighlight.back,
+    onChange: e => setPendingHighlight(p => ({
+      ...p,
+      back: e.target.value
+    })),
+    onKeyDown: e => e.key === "Enter" && confirmHighlightCard()
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "highlight-capture-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small",
+    onClick: () => setPendingHighlight(null)
+  }, "Dismiss"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary small",
+    onClick: confirmHighlightCard,
+    disabled: !pendingHighlight.back.trim()
+  }, "Add card"))), /*#__PURE__*/React.createElement("div", {
+    className: "image-row"
+  }, /*#__PURE__*/React.createElement("label", {
+    className: "btn-ghost small file-label"
+  }, imgBusy ? "Adding…" : "+ Add image", /*#__PURE__*/React.createElement("input", {
+    type: "file",
+    accept: "image/*",
+    multiple: true,
+    className: "visually-hidden-file",
+    onChange: e => {
+      addImageFiles(Array.from(e.target.files || []));
+      e.target.value = "";
+    }
+  })), /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small",
+    onClick: () => setShowDraw(true)
+  }, "\u270E Draw"), imgError && /*#__PURE__*/React.createElement("span", {
+    className: "gen-error"
+  }, imgError)), images.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "image-thumbs"
+  }, images.map(img => /*#__PURE__*/React.createElement("div", {
+    key: img.id,
+    className: "image-thumb-wrap"
+  }, /*#__PURE__*/React.createElement("img", {
+    src: img.dataUrl,
+    alt: "",
+    className: "image-thumb-full",
+    onClick: () => onViewImage && onViewImage(img.dataUrl),
+    style: {
+      cursor: "zoom-in"
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "image-thumb-remove",
+    onClick: () => removeImage(img.id)
+  }, "\u2715"), /*#__PURE__*/React.createElement("button", {
+    className: "image-thumb-annotate",
+    title: "Annotate",
+    onClick: () => setAnnotatingThumb(img)
+  }, "\u270E"), note.id && onOccludeImage && /*#__PURE__*/React.createElement("button", {
+    className: "image-thumb-occlude",
+    title: "Make occlusion cards from this image",
+    onClick: () => onOccludeImage(img.dataUrl, note.id)
+  }, "\u25A7")))), annotatingThumb && /*#__PURE__*/React.createElement(DrawingCanvas, {
+    backgroundImageUrl: annotatingThumb.dataUrl,
+    onCancel: () => setAnnotatingThumb(null),
+    onSave: dataUrl => {
+      updateImage(annotatingThumb.id, dataUrl);
+      setAnnotatingThumb(null);
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "tag-input-row"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "tag-pills-edit"
+  }, tagNames.map(t => /*#__PURE__*/React.createElement("span", {
+    key: t,
+    className: "tag-pill editable"
+  }, "#", t, " ", /*#__PURE__*/React.createElement("button", {
+    onClick: () => removeTag(t)
+  }, "\u2715"))), /*#__PURE__*/React.createElement("input", {
+    placeholder: "Add tag, comma or enter",
+    value: tagInput,
+    onChange: e => setTagInput(e.target.value),
+    onKeyDown: e => {
+      if (e.key === "Enter" || e.key === ",") {
+        e.preventDefault();
+        addTagFromInput();
+      }
+    },
+    onBlur: addTagFromInput
+  })), allTags.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "existing-tags"
+  }, allTags.filter(t => !tagNames.includes(t.name)).slice(0, 8).map(t => /*#__PURE__*/React.createElement("button", {
+    key: t.id,
+    className: "existing-tag-btn",
+    onClick: () => setTagNames(cur => [...cur, t.name])
+  }, "+", t.name)))), /*#__PURE__*/React.createElement("div", {
+    className: "link-notes-section"
+  }, /*#__PURE__*/React.createElement("label", {
+    className: "field-label"
+  }, "Link to other notes"), linkedNotes.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "linked-note-chips"
+  }, linkedNotes.map(n => /*#__PURE__*/React.createElement("span", {
+    key: n.id,
+    className: "linked-note-chip"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "linked-note-chip-dot",
+    style: {
+      background: subjectColorFor(n.subjectId)
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "linked-note-chip-label",
+    onClick: () => onNavigateToNote(n.id)
+  }, n.title), /*#__PURE__*/React.createElement("button", {
+    className: "linked-note-chip-remove",
+    onClick: () => removeLink(n.id),
+    title: "Unlink"
+  }, "\u2715")))), /*#__PURE__*/React.createElement("div", {
+    className: "link-search-wrap"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "link-search-input",
+    placeholder: "Search notes to link\u2026",
+    value: noteSearch,
+    onChange: e => setNoteSearch(e.target.value)
+  }), noteSearchResults.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "link-search-results"
+  }, noteSearchResults.map(n => /*#__PURE__*/React.createElement("button", {
+    key: n.id,
+    className: "link-search-result",
+    onClick: () => addLink(n.id)
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "linked-note-chip-dot",
+    style: {
+      background: subjectColorFor(n.subjectId)
+    }
+  }), /*#__PURE__*/React.createElement("span", null, n.title), /*#__PURE__*/React.createElement("span", {
+    className: "link-search-result-subject"
+  }, subjectNameFor(n.subjectId)))))), backlinkNotes.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "backlinks-row"
+  }, /*#__PURE__*/React.createElement("label", {
+    className: "field-label"
+  }, "Linked from"), /*#__PURE__*/React.createElement("div", {
+    className: "linked-note-chips"
+  }, backlinkNotes.map(n => /*#__PURE__*/React.createElement("span", {
+    key: n.id,
+    className: "linked-note-chip readonly"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "linked-note-chip-dot",
+    style: {
+      background: subjectColorFor(n.subjectId)
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "linked-note-chip-label",
+    onClick: () => onNavigateToNote(n.id)
+  }, n.title)))))))), scrollFade.top && /*#__PURE__*/React.createElement("div", {
+    className: "scroll-fade scroll-fade-top"
+  }), scrollFade.bottom && /*#__PURE__*/React.createElement("div", {
+    className: "scroll-fade scroll-fade-bottom"
+  }), scrollThumb.visible && /*#__PURE__*/React.createElement("div", {
+    className: "custom-scrollbar-track"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "custom-scrollbar-thumb",
+    style: {
+      top: scrollThumb.top + "%",
+      height: scrollThumb.height + "%"
+    }
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "modal-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost",
+    onClick: onCancel
+  }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    onClick: handleSave,
+    disabled: !noteHasContent(title, bodyHTML, images)
+  }, "Save note")), showDraw && /*#__PURE__*/React.createElement(DrawingCanvas, {
+    onCancel: () => setShowDraw(false),
+    onSave: dataUrl => {
+      setImages(cur => [...cur, {
+        id: uid(),
+        dataUrl
+      }]);
+      setShowDraw(false);
+    }
+  }));
 }
+
+// ---------- Separator-paste card import (Quizlet-style) ----------
+
+const TERM_SEP_OPTIONS = [{
+  label: "Tab",
+  value: "\t"
+}, {
+  label: "Comma",
+  value: ","
+}, {
+  label: "Dash ( - )",
+  value: " - "
+}, {
+  label: "Custom…",
+  value: "custom"
+}];
+const CARD_SEP_OPTIONS = [{
+  label: "New line",
+  value: "\n"
+}, {
+  label: "Semicolon",
+  value: ";"
+}, {
+  label: "Custom…",
+  value: "custom"
+}];
+function ImportCardsModal({
+  onCancel,
+  onConfirm
+}) {
+  const [text, setText] = useState("");
+  const [termSepChoice, setTermSepChoice] = useState("\t");
+  const [termSepCustom, setTermSepCustom] = useState("");
+  const [cardSepChoice, setCardSepChoice] = useState("\n");
+  const [cardSepCustom, setCardSepCustom] = useState("");
+  const [candidates, setCandidates] = useState(null);
+  const [parseError, setParseError] = useState("");
+  const effectiveTermSep = termSepChoice === "custom" ? termSepCustom : termSepChoice;
+  const effectiveCardSep = cardSepChoice === "custom" ? cardSepCustom : cardSepChoice;
+  const handleParse = () => {
+    setParseError("");
+    if (!effectiveTermSep) {
+      setParseError("Enter a custom separator between term and definition.");
+      return;
+    }
+    if (!effectiveCardSep) {
+      setParseError("Enter a custom separator between cards.");
+      return;
+    }
+    const parsed = parseSeparatorText(text, effectiveTermSep, effectiveCardSep);
+    if (!parsed.length) {
+      setParseError("Couldn't find any term/definition pairs with those separators — check your text and separator choice.");
+      return;
+    }
+    setCandidates(parsed.map(c => ({
+      ...c,
+      id: uid()
+    })));
+  };
+  const updateCandidate = (idx, field, value) => {
+    setCandidates(cur => cur.map((c, i) => i === idx ? {
+      ...c,
+      [field]: value
+    } : c));
+  };
+  const removeCandidate = idx => setCandidates(cur => cur.filter((_, i) => i !== idx));
+  const handleConfirm = () => {
+    onConfirm(candidates.map(({
+      front,
+      back
+    }) => ({
+      front,
+      back
+    })));
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    className: "modal-backdrop",
+    onClick: onCancel
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal wide",
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal-header"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "eyebrow"
+  }, "Import cards"), /*#__PURE__*/React.createElement("button", {
+    className: "modal-close",
+    onClick: onCancel
+  }, "\u2715")), candidates === null ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+    className: "modal-copy"
+  }, "Paste term/definition pairs \u2014 copy straight out of a spreadsheet, doc, or a Quizlet set's export and this will split it into cards. Pick the separators that match your text."), /*#__PURE__*/React.createElement("textarea", {
+    className: "import-textarea",
+    placeholder: "heart failure\treduced ability of the heart to pump blood\nafterload\tresistance the heart pumps against",
+    value: text,
+    onChange: e => setText(e.target.value)
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "sep-row"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "sep-field"
+  }, /*#__PURE__*/React.createElement("label", null, "Between term and definition"), /*#__PURE__*/React.createElement("select", {
+    value: termSepChoice,
+    onChange: e => setTermSepChoice(e.target.value)
+  }, TERM_SEP_OPTIONS.map(o => /*#__PURE__*/React.createElement("option", {
+    key: o.value,
+    value: o.value
+  }, o.label))), termSepChoice === "custom" && /*#__PURE__*/React.createElement("input", {
+    placeholder: "e.g. ::",
+    value: termSepCustom,
+    onChange: e => setTermSepCustom(e.target.value)
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "sep-field"
+  }, /*#__PURE__*/React.createElement("label", null, "Between cards"), /*#__PURE__*/React.createElement("select", {
+    value: cardSepChoice,
+    onChange: e => setCardSepChoice(e.target.value)
+  }, CARD_SEP_OPTIONS.map(o => /*#__PURE__*/React.createElement("option", {
+    key: o.value,
+    value: o.value
+  }, o.label))), cardSepChoice === "custom" && /*#__PURE__*/React.createElement("input", {
+    placeholder: "e.g. |||",
+    value: cardSepCustom,
+    onChange: e => setCardSepCustom(e.target.value)
+  }))), parseError && /*#__PURE__*/React.createElement("div", {
+    className: "gen-error"
+  }, parseError), /*#__PURE__*/React.createElement("div", {
+    className: "modal-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost",
+    onClick: onCancel
+  }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    onClick: handleParse,
+    disabled: !text.trim()
+  }, "Split into cards"))) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+    className: "modal-copy"
+  }, "Found ", candidates.length, " card", candidates.length === 1 ? "" : "s", " \u2014 review, edit, or discard before adding."), /*#__PURE__*/React.createElement("div", {
+    className: "candidate-list"
+  }, candidates.map((c, i) => /*#__PURE__*/React.createElement("div", {
+    key: c.id,
+    className: "candidate-row"
+  }, /*#__PURE__*/React.createElement("textarea", {
+    className: "candidate-front",
+    value: c.front,
+    onChange: e => updateCandidate(i, "front", e.target.value)
+  }), /*#__PURE__*/React.createElement("textarea", {
+    className: "candidate-back",
+    value: c.back,
+    onChange: e => updateCandidate(i, "back", e.target.value)
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "candidate-remove",
+    onClick: () => removeCandidate(i)
+  }, "\u2715"))), candidates.length === 0 && /*#__PURE__*/React.createElement("p", {
+    className: "modal-copy"
+  }, "All cards discarded.")), /*#__PURE__*/React.createElement("div", {
+    className: "modal-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost",
+    onClick: () => setCandidates(null)
+  }, "Back"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    onClick: handleConfirm,
+    disabled: candidates.length === 0
+  }, "Add ", candidates.length, " card", candidates.length === 1 ? "" : "s", " to deck")))));
+}
+
+// ---------- Card editor ----------
+
+function CardEditor({
+  card,
+  onCancel,
+  onSave
+}) {
+  const isOcclusion = !!card.frontImage;
+  const [front, setFront] = useState(card.front);
+  const [back, setBack] = useState(card.back);
+  return /*#__PURE__*/React.createElement("div", {
+    className: "modal-backdrop",
+    onClick: onCancel
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal",
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal-header"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "eyebrow"
+  }, "Edit card"), /*#__PURE__*/React.createElement("button", {
+    className: "modal-close",
+    onClick: onCancel
+  }, "\u2715")), isOcclusion ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("label", {
+    className: "field-label"
+  }, "Question (image)"), /*#__PURE__*/React.createElement("img", {
+    src: card.frontImage,
+    alt: "",
+    className: "card-editor-thumb"
+  })) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("label", {
+    className: "field-label"
+  }, "Question"), /*#__PURE__*/React.createElement("textarea", {
+    className: "candidate-front",
+    value: front,
+    onChange: e => setFront(e.target.value)
+  })), /*#__PURE__*/React.createElement("label", {
+    className: "field-label"
+  }, isOcclusion ? "Label" : "Answer"), /*#__PURE__*/React.createElement("textarea", {
+    className: "candidate-back",
+    value: back,
+    onChange: e => setBack(e.target.value)
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "modal-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost",
+    onClick: onCancel
+  }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    disabled: !isOcclusion && !front.trim() || !back.trim(),
+    onClick: () => onSave(card.id, isOcclusion ? card.front : front.trim(), back.trim())
+  }, "Save card"))));
+}
+
+// ---------- Study panel ----------
+
+function StudyPanel({
+  subject,
+  notes,
+  cards,
+  dueCount,
+  missedCount,
+  points,
+  onImport,
+  onReview,
+  onMatch,
+  onOcclusion,
+  onToggleStar,
+  onDelete,
+  onEdit,
+  scope,
+  onScopeChange,
+  notesWithCards,
+  noteFilter,
+  onNoteFilterChange,
+  selectedCardIds,
+  onToggleCardSelect,
+  onClearSelection
+}) {
+  const [sortBy, setSortBy] = useState("due"); // "due" | "box" | "newest" | "az"
+
+  const starredCount = cards.filter(c => c.starred).length;
+  const selectedVisibleCount = cards.filter(c => selectedCardIds.has(c.id)).length;
+  const activeCount = scope === "starred" ? starredCount : scope === "all" ? cards.length : scope === "selected" ? selectedVisibleCount : dueCount;
+  const sortedCards = useMemo(() => {
+    const arr = [...cards];
+    if (sortBy === "due") arr.sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));else if (sortBy === "box") arr.sort((a, b) => a.box - b.box);else if (sortBy === "newest") arr.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));else if (sortBy === "az") arr.sort((a, b) => a.front.localeCompare(b.front));
+    return arr;
+  }, [cards, sortBy]);
+  const allVisibleSelected = cards.length > 0 && cards.every(c => selectedCardIds.has(c.id));
+  const selectAllVisible = () => cards.forEach(c => {
+    if (!selectedCardIds.has(c.id)) onToggleCardSelect(c.id);
+  });
+  return /*#__PURE__*/React.createElement("div", {
+    className: "study-panel"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "deck-meta-line"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "deck-count"
+  }, cards.length, " card", cards.length === 1 ? "" : "s"), /*#__PURE__*/React.createElement("span", {
+    className: "deck-dot"
+  }, "\xB7"), /*#__PURE__*/React.createElement("span", {
+    className: "deck-subject-tag"
+  }, subject.name)), /*#__PURE__*/React.createElement("div", {
+    className: "study-stats"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "stat"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "stat-value"
+  }, dueCount), /*#__PURE__*/React.createElement("span", {
+    className: "stat-label"
+  }, "due now")), /*#__PURE__*/React.createElement("div", {
+    className: "stat"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "stat-value"
+  }, cards.length), /*#__PURE__*/React.createElement("span", {
+    className: "stat-label"
+  }, "total cards")), /*#__PURE__*/React.createElement("div", {
+    className: "stat"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "stat-value"
+  }, missedCount), /*#__PURE__*/React.createElement("span", {
+    className: "stat-label"
+  }, "need review")), /*#__PURE__*/React.createElement("div", {
+    className: "stat"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "stat-value"
+  }, points), /*#__PURE__*/React.createElement("span", {
+    className: "stat-label"
+  }, "points"))), /*#__PURE__*/React.createElement("div", {
+    className: "study-mode-row"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "mode-tile" + (activeCount === 0 ? " disabled" : ""),
+    style: {
+      "--mode-accent": subject.color
+    },
+    onClick: onReview,
+    disabled: activeCount === 0
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "mode-tile-icon"
+  }, "\u25A4"), /*#__PURE__*/React.createElement("span", {
+    className: "mode-tile-label"
+  }, "Cards")), /*#__PURE__*/React.createElement("button", {
+    className: "mode-tile" + (activeCount < 4 ? " disabled" : ""),
+    style: {
+      "--mode-accent": subject.color
+    },
+    onClick: onMatch,
+    disabled: activeCount < 4
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "mode-tile-icon"
+  }, "\u26AD"), /*#__PURE__*/React.createElement("span", {
+    className: "mode-tile-label"
+  }, "Match")), "        ", /*#__PURE__*/React.createElement("button", {
+    className: "mode-tile",
+    style: {
+      "--mode-accent": subject.color
+    },
+    onClick: onImport
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "mode-tile-icon"
+  }, "+"), /*#__PURE__*/React.createElement("span", {
+    className: "mode-tile-label"
+  }, "Import")), /*#__PURE__*/React.createElement("button", {
+    className: "mode-tile",
+    style: {
+      "--mode-accent": subject.color
+    },
+    onClick: onOcclusion
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "mode-tile-icon"
+  }, "\u25A7"), /*#__PURE__*/React.createElement("span", {
+    className: "mode-tile-label"
+  }, "Occlude"))), /*#__PURE__*/React.createElement("div", {
+    className: "scope-toggle"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "scope-btn" + (scope === "due" ? " active" : ""),
+    onClick: () => onScopeChange("due")
+  }, "Due (", dueCount, ")"), /*#__PURE__*/React.createElement("button", {
+    className: "scope-btn" + (scope === "starred" ? " active" : ""),
+    onClick: () => onScopeChange("starred")
+  }, "Starred (", starredCount, ")"), /*#__PURE__*/React.createElement("button", {
+    className: "scope-btn" + (scope === "all" ? " active" : ""),
+    onClick: () => onScopeChange("all")
+  }, "All (", cards.length, ")"), selectedCardIds.size > 0 && /*#__PURE__*/React.createElement("button", {
+    className: "scope-btn" + (scope === "selected" ? " active" : ""),
+    onClick: () => onScopeChange("selected")
+  }, "Selected (", selectedVisibleCount, ")")), notesWithCards.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "study-filter-row"
+  }, /*#__PURE__*/React.createElement("label", {
+    className: "field-label"
+  }, "Study one note"), /*#__PURE__*/React.createElement("select", {
+    className: "parent-select",
+    value: noteFilter || "",
+    onChange: e => onNoteFilterChange(e.target.value || null)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "All notes in this subject"), notesWithCards.map(n => /*#__PURE__*/React.createElement("option", {
+    key: n.id,
+    value: n.id
+  }, n.title)))), cards.length === 0 && /*#__PURE__*/React.createElement("p", {
+    className: "study-hint"
+  }, "No cards yet \u2014 tap Import to paste term/definition pairs, or highlight text in a note to create one."), cards.length > 0 && activeCount === 0 && /*#__PURE__*/React.createElement("p", {
+    className: "study-hint"
+  }, scope === "selected" ? "Nothing selected yet — check a few cards below." : `No cards in this scope yet — try "All", or star a few cards.`), cards.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    className: "term-table-toolbar"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "term-select-controls"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small",
+    onClick: allVisibleSelected ? onClearSelection : selectAllVisible
+  }, allVisibleSelected ? "Clear selection" : "Select all shown"), selectedCardIds.size > 0 && /*#__PURE__*/React.createElement("span", {
+    className: "term-select-count"
+  }, selectedCardIds.size, " selected")), /*#__PURE__*/React.createElement("div", {
+    className: "sort-field"
+  }, /*#__PURE__*/React.createElement("label", {
+    className: "field-label"
+  }, "Sort"), /*#__PURE__*/React.createElement("select", {
+    value: sortBy,
+    onChange: e => setSortBy(e.target.value)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "due"
+  }, "Due soonest"), /*#__PURE__*/React.createElement("option", {
+    value: "box"
+  }, "Weakest first (box)"), /*#__PURE__*/React.createElement("option", {
+    value: "newest"
+  }, "Newest first"), /*#__PURE__*/React.createElement("option", {
+    value: "az"
+  }, "A\u2013Z")))), /*#__PURE__*/React.createElement("div", {
+    className: "term-table"
+  }, sortedCards.map(c => /*#__PURE__*/React.createElement("div", {
+    key: c.id,
+    className: "term-row" + (selectedCardIds.has(c.id) ? " selected" : "")
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    className: "term-checkbox",
+    checked: selectedCardIds.has(c.id),
+    onChange: () => onToggleCardSelect(c.id)
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "term-front",
+    onClick: () => onEdit(c)
+  }, c.frontImage ? /*#__PURE__*/React.createElement("img", {
+    src: c.frontImage,
+    alt: "",
+    className: "term-thumb"
+  }) : c.front), /*#__PURE__*/React.createElement("div", {
+    className: "term-back",
+    onClick: () => onEdit(c)
+  }, c.back), /*#__PURE__*/React.createElement("div", {
+    className: "term-actions"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "box-badge box-" + c.box
+  }, "box ", c.box), /*#__PURE__*/React.createElement("button", {
+    className: "star-btn" + (c.starred ? " starred" : ""),
+    title: c.starred ? "Unstar" : "Star to always review",
+    onClick: () => onToggleStar(c.id)
+  }, c.starred ? "★" : "☆"), /*#__PURE__*/React.createElement("button", {
+    title: "Edit card",
+    onClick: () => onEdit(c)
+  }, "\u270E"), /*#__PURE__*/React.createElement("button", {
+    title: "Delete card",
+    onClick: () => onDelete(c.id)
+  }, "\u2715")))))));
+}
+
+// ---------- Review session (flip cards) ----------
+
+function ReviewSessionInner({
+  cards,
+  onAnswer,
+  onToggleStar,
+  onClose,
+  compact
+}) {
+  const [order] = useState(() => [...cards].sort(() => Math.random() - 0.5));
+  const [index, setIndex] = useState(0);
+  const [flipped, setFlipped] = useState(false);
+  const [correct, setCorrect] = useState(0);
+  const [missed, setMissed] = useState(0);
+  const [starredIds, setStarredIds] = useState(() => new Set(cards.filter(c => c.starred).map(c => c.id)));
+  const current = order[index];
+  const done = index >= order.length;
+  const handleAnswer = async isCorrect => {
+    if (!current) return;
+    await onAnswer(current.id, isCorrect);
+    if (isCorrect) setCorrect(c => c + 1);else setMissed(m => m + 1);
+    setFlipped(false);
+    setIndex(i => i + 1);
+  };
+  const handleStar = () => {
+    if (!current) return;
+    onToggleStar(current.id);
+    setStarredIds(cur => {
+      const next = new Set(cur);
+      if (next.has(current.id)) next.delete(current.id);else next.add(current.id);
+      return next;
+    });
+  };
+  useEffect(() => {
+    // A compact review embedded in a split pane shouldn't hijack the whole
+    // page's keyboard input — only the full-screen version gets shortcuts.
+    if (compact) return;
+    const handleKey = e => {
+      if (done || !current) return;
+      if (e.key === " " || e.key === "Enter") {
+        e.preventDefault();
+        if (!flipped) setFlipped(true);else handleAnswer(true);
+      } else if (flipped && (e.key === "ArrowRight" || e.key === "2")) {
+        e.preventDefault();
+        handleAnswer(true);
+      } else if (flipped && (e.key === "ArrowLeft" || e.key === "1")) {
+        e.preventDefault();
+        handleAnswer(false);
+      } else if (e.key === "s" || e.key === "S") {
+        e.preventDefault();
+        handleStar();
+      } else if (e.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [flipped, done, current, compact]);
+  if (order.length === 0) {
+    return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+      className: "modal-copy"
+    }, "No cards due right now."), /*#__PURE__*/React.createElement("div", {
+      className: "modal-actions"
+    }, /*#__PURE__*/React.createElement("button", {
+      className: "btn-primary",
+      onClick: onClose
+    }, "Close")));
+  }
+  return /*#__PURE__*/React.createElement(React.Fragment, null, done ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    className: "eyebrow"
+  }, "Session complete"), /*#__PURE__*/React.createElement("h2", {
+    className: "review-summary-title"
+  }, correct, " / ", order.length, " correct"), /*#__PURE__*/React.createElement("p", {
+    className: "modal-copy"
+  }, missed > 0 ? `${missed} card${missed === 1 ? "" : "s"} sent back to box 1 for another pass.` : "Clean sweep."), /*#__PURE__*/React.createElement("div", {
+    className: "modal-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    onClick: onClose
+  }, "Done"))) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    className: "review-progress"
+  }, index + 1, " / ", order.length), /*#__PURE__*/React.createElement("div", {
+    className: "flip-card" + (flipped ? " is-flipped" : "") + (compact ? " compact" : ""),
+    onClick: () => setFlipped(f => !f)
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "review-star" + (starredIds.has(current.id) ? " starred" : ""),
+    onClick: e => {
+      e.stopPropagation();
+      handleStar();
+    },
+    title: starredIds.has(current.id) ? "Unstar" : "Star this card"
+  }, starredIds.has(current.id) ? "★" : "☆"), /*#__PURE__*/React.createElement("div", {
+    className: "flip-card-label"
+  }, flipped ? "Answer" : "Question"), flipped ? /*#__PURE__*/React.createElement(React.Fragment, null, current.backImage && /*#__PURE__*/React.createElement("img", {
+    src: current.backImage,
+    alt: "",
+    className: "flip-card-image"
+  }), current.back && /*#__PURE__*/React.createElement("div", {
+    className: "flip-card-text"
+  }, current.back)) : current.frontImage ? /*#__PURE__*/React.createElement("img", {
+    src: current.frontImage,
+    alt: "",
+    className: "flip-card-image"
+  }) : /*#__PURE__*/React.createElement("div", {
+    className: "flip-card-text"
+  }, current.front), !flipped && /*#__PURE__*/React.createElement("div", {
+    className: "flip-hint"
+  }, "Tap to reveal")), flipped ? /*#__PURE__*/React.createElement("div", {
+    className: "answer-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost danger",
+    onClick: () => handleAnswer(false)
+  }, "Missed it"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    onClick: () => handleAnswer(true)
+  }, "Got it")) : /*#__PURE__*/React.createElement("div", {
+    className: "modal-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost",
+    onClick: onClose
+  }, compact ? "Back to list" : "Stop for now")), !compact && /*#__PURE__*/React.createElement("p", {
+    className: "keyboard-hint"
+  }, "Space flip \xB7 \u2190 missed \xB7 \u2192 got it \xB7 S star")));
+}
+function ReviewSession({
+  cards,
+  onAnswer,
+  onToggleStar,
+  onClose
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: "modal-backdrop"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal review-modal"
+  }, /*#__PURE__*/React.createElement(ReviewSessionInner, {
+    cards: cards,
+    onAnswer: onAnswer,
+    onToggleStar: onToggleStar,
+    onClose: onClose
+  })));
+}
+
+// ---------- Split-pane flashcards (view + study a note's cards alongside it) ----------
+
+function SplitCardsPanel({
+  cards,
+  scope,
+  onScopeChange,
+  noteTitle,
+  subjectTitle,
+  onClose,
+  onEditCard,
+  onToggleStar,
+  onDeleteCard,
+  onStudy
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: "note-editor-pane split cards-pane"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal-header"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "eyebrow"
+  }, "Flashcards"), /*#__PURE__*/React.createElement("button", {
+    className: "modal-close",
+    onClick: onClose
+  }, "\u2715 Close pane")), /*#__PURE__*/React.createElement("div", {
+    className: "note-editor-scroll-region"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "scope-toggle"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "scope-btn" + (scope === "note" ? " active" : ""),
+    onClick: () => onScopeChange("note")
+  }, "This note", noteTitle ? `: ${noteTitle}` : ""), /*#__PURE__*/React.createElement("button", {
+    className: "scope-btn" + (scope === "subject" ? " active" : ""),
+    onClick: () => onScopeChange("subject")
+  }, "Whole subject", subjectTitle ? `: ${subjectTitle}` : "")), /*#__PURE__*/React.createElement("div", {
+    className: "deck-meta-line"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "deck-count"
+  }, cards.length, " card", cards.length === 1 ? "" : "s")), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    disabled: cards.length === 0,
+    onClick: onStudy
+  }, "Study these"), /*#__PURE__*/React.createElement("div", {
+    className: "split-cards-list"
+  }, cards.length === 0 && /*#__PURE__*/React.createElement("p", {
+    className: "study-hint"
+  }, "No cards yet \u2014 highlight text or write a \"question :: answer\" line in the note to create one."), cards.map(c => /*#__PURE__*/React.createElement("div", {
+    key: c.id,
+    className: "term-row"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "term-front",
+    onClick: () => onEditCard(c)
+  }, c.frontImage ? /*#__PURE__*/React.createElement("img", {
+    src: c.frontImage,
+    alt: "",
+    className: "term-thumb"
+  }) : c.front), /*#__PURE__*/React.createElement("div", {
+    className: "term-back",
+    onClick: () => onEditCard(c)
+  }, c.back), /*#__PURE__*/React.createElement("div", {
+    className: "term-actions"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "box-badge box-" + c.box
+  }, "box ", c.box), /*#__PURE__*/React.createElement("button", {
+    className: "star-btn" + (c.starred ? " starred" : ""),
+    onClick: () => onToggleStar(c.id)
+  }, c.starred ? "★" : "☆"), /*#__PURE__*/React.createElement("button", {
+    title: "Edit card",
+    onClick: () => onEditCard(c)
+  }, "\u270E"), /*#__PURE__*/React.createElement("button", {
+    title: "Delete card",
+    onClick: () => onDeleteCard(c.id)
+  }, "\u2715")))))));
+}
+
+// ---------- Match game ----------
+
+function MatchGame({
+  cards,
+  onClose
+}) {
+  // Image-occlusion cards don't have front text, so they don't fit the
+  // text-tile matching format — leave them out of the round pool entirely.
+  const matchableCards = useMemo(() => cards.filter(c => !c.frontImage), [cards]);
+  const roundCards = useMemo(() => {
+    const shuffled = [...matchableCards].sort(() => Math.random() - 0.5);
+    return shuffled.slice(0, Math.min(8, shuffled.length));
+  }, [matchableCards]);
+  const [tiles] = useState(() => {
+    const t = [];
+    roundCards.forEach(c => {
+      t.push({
+        id: c.id + "-f",
+        cardId: c.id,
+        text: c.front
+      });
+      t.push({
+        id: c.id + "-b",
+        cardId: c.id,
+        text: c.back
+      });
+    });
+    return t.sort(() => Math.random() - 0.5);
+  });
+  const [selected, setSelected] = useState([]);
+  const [matchedCardIds, setMatchedCardIds] = useState(() => new Set());
+  const [wrongIds, setWrongIds] = useState([]);
+  const [seconds, setSeconds] = useState(0);
+  const [running, setRunning] = useState(true);
+  useEffect(() => {
+    if (!running) return;
+    const id = setInterval(() => setSeconds(s => s + 1), 1000);
+    return () => clearInterval(id);
+  }, [running]);
+  const done = matchedCardIds.size === roundCards.length && roundCards.length > 0;
+  useEffect(() => {
+    if (done) setRunning(false);
+  }, [done]);
+  const handleTap = tile => {
+    if (matchedCardIds.has(tile.cardId)) return;
+    if (selected.some(s => s.id === tile.id)) return;
+    if (selected.length === 0) {
+      setSelected([tile]);
+      return;
+    }
+    if (selected.length === 1) {
+      const first = selected[0];
+      if (first.cardId === tile.cardId) {
+        setMatchedCardIds(cur => new Set([...cur, tile.cardId]));
+        setSelected([]);
+      } else {
+        setWrongIds([first.id, tile.id]);
+        setTimeout(() => {
+          setWrongIds([]);
+          setSelected([]);
+        }, 600);
+        setSelected([first, tile]);
+      }
+    }
+  };
+  if (roundCards.length === 0) {
+    return /*#__PURE__*/React.createElement("div", {
+      className: "modal-backdrop",
+      onClick: onClose
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "modal",
+      onClick: e => e.stopPropagation()
+    }, /*#__PURE__*/React.createElement("p", {
+      className: "modal-copy"
+    }, cards.length > 0 && matchableCards.length === 0 ? "These cards are all image-occlusion cards, which don't fit the Match format — try Cards mode instead." : "No cards available to match right now."), /*#__PURE__*/React.createElement("div", {
+      className: "modal-actions"
+    }, /*#__PURE__*/React.createElement("button", {
+      className: "btn-primary",
+      onClick: onClose
+    }, "Close"))));
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    className: "modal-backdrop"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal wide"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal-header"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "eyebrow"
+  }, "Match"), /*#__PURE__*/React.createElement("span", {
+    className: "match-timer"
+  }, seconds, "s"), /*#__PURE__*/React.createElement("button", {
+    className: "modal-close",
+    onClick: onClose
+  }, "\u2715")), done ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("h2", {
+    className: "review-summary-title"
+  }, "Matched in ", seconds, "s"), /*#__PURE__*/React.createElement("div", {
+    className: "modal-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    onClick: onClose
+  }, "Done"))) : /*#__PURE__*/React.createElement("div", {
+    className: "match-grid"
+  }, tiles.map(tile => {
+    const matched = matchedCardIds.has(tile.cardId);
+    const isSelected = selected.some(s => s.id === tile.id);
+    const isWrong = wrongIds.includes(tile.id);
+    return /*#__PURE__*/React.createElement("div", {
+      key: tile.id,
+      className: "match-tile" + (matched ? " matched" : "") + (isSelected ? " selected" : "") + (isWrong ? " wrong" : ""),
+      onClick: () => handleTap(tile)
+    }, tile.text);
+  }))));
+}
+
 // ---------- Styles ----------
+
 function Styles() {
-    return (React.createElement("style", null, `
+  return /*#__PURE__*/React.createElement("style", null, `
       @import url('https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;700&family=Inter:wght@400;500;600;700&display=swap');
 
       .brainly-root {
@@ -5360,25 +6828,17 @@ function Styles() {
       .icon-toggle-btn:hover { background: var(--soft); color: var(--ink); }
       .icon-toggle-btn.on { color: var(--primary-dark); border-color: var(--primary); background: var(--soft); }
 
-      .drive-sync-section { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--border); }
-      .drive-sync-status { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11.5px; color: var(--muted); }
-      .drive-sync-error { font-size: 11px; color: var(--red); margin: 0; line-height: 1.4; }
-      .drive-backup-section { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--border); }
-      .ai-settings-section { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--border); }
-      .ai-settings-label { font-size: 12px; font-weight: 600; color: var(--muted); }
-      .ai-key-row { display: flex; gap: 6px; align-items: center; }
-      .ai-key-row .url-input { flex: 1; }
-      .ai-settings-hint { font-size: 11px; color: var(--muted); line-height: 1.4; margin: 0; }
-      .ai-toolbar { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 16px; border-bottom: 1px solid var(--border); }
-      .ai-error { font-size: 12px; color: #E8896B; margin: 0; padding: 0 16px; }
-      .ai-result-box { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin: 8px 16px; font-size: 13px; line-height: 1.5; }
-      .ai-ask-box { padding: 0 16px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 8px; }
-      .ai-flashcard-preview { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin: 8px 16px; }
-      .ai-flashcard-item { display: flex; flex-direction: column; gap: 2px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
-      .ai-flashcard-item:last-of-type { border-bottom: none; }
-      .ai-flashcard-item span { color: var(--muted); }
-      .drive-backup-message { font-size: 11px; color: var(--muted); margin: 0; line-height: 1.4; }
-      .device-export-section { margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--border); }
+      .note-error { font-size: 12px; color: #E8896B; margin: 0; padding: 0 16px; }
+      .files-page { max-width: 760px; display: flex; flex-direction: column; gap: 16px; }
+      .files-page h1 { margin: 0; font-size: 28px; font-weight: 700; }
+      .files-lede { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.55; }
+      .files-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 18px 20px; display: flex; flex-direction: column; gap: 10px; }
+      .files-card h2 { margin: 0; font-size: 16px; font-weight: 700; }
+      .files-card p { margin: 0; color: var(--muted); font-size: 13.5px; line-height: 1.5; }
+      .files-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+      .files-steps { margin: 2px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; line-height: 1.55; color: var(--ink); }
+      .files-steps code { font-size: 12px; background: var(--soft); padding: 1px 5px; border-radius: 4px; }
+      .files-note { margin: 0 0 24px; font-size: 12.5px; color: var(--muted); line-height: 1.5; }
       .pin-lock-section { margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
       .pin-lock-actions { display: flex; gap: 8px; }
 
@@ -6071,7 +7531,7 @@ function Styles() {
         .sidebar { width: 100%; min-width: 0; border-right: none; border-bottom: 1px solid var(--border); }
         .main { padding: 20px; }
       }
-    `));
+    `);
 }
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(React.createElement(Brainly, null));
