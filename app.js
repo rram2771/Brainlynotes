@@ -1645,61 +1645,81 @@ function Brainly() {
   // subject, auto-created/reused the same way Kindle and PDF imports
   // each get their own.
   const handleMarkdownImportFile = e => {
-    const file = e.target.files && e.target.files[0];
+    // Accepts several files at once (e.g. a whole folder of notes picked from Drive).
+    const files = Array.from(e.target.files || []);
     e.target.value = "";
-    if (!file) return;
+    if (!files.length) return;
     setMdImportBusy(true);
-    const reader = new FileReader();
-    reader.onload = async () => {
-      setMdImportBusy(false);
-      const text = reader.result;
-      if (!text || !text.trim()) {
-        showToast("That file looks empty.");
-        return;
-      }
-      const noteData = buildBrainlyNoteFromMarkdownFile(text, file.name);
-      let subject = data.subjects.find(s => s.name === "Imported Notes");
-      let subjects = data.subjects;
-      if (!subject) {
-        subject = {
-          id: uid(),
-          name: "Imported Notes",
-          color: "#00A187",
-          parentId: null,
-          createdAt: nowISO()
-        };
-        subjects = [...subjects, subject];
-      }
-      const {
-        tags,
-        ids: mdTagIds
-      } = resolveTagIds(noteData.tagNames, data.tags);
-      const now = nowISO();
-      const note = {
-        id: uid(),
-        subjectId: subject.id,
-        title: noteData.title,
-        bodyHTML: noteData.bodyHTML,
-        tagIds: mdTagIds,
-        images: noteData.images,
-        color: null,
-        linkedNoteIds: [],
-        createdAt: now,
-        updatedAt: now
-      };
-      await persist({
-        ...data,
-        subjects,
-        tags,
-        notes: [...data.notes, note]
+    const readText = file => new Promise(resolve => {
+      const reader = new FileReader();
+      reader.onload = () => resolve({
+        file,
+        text: reader.result
       });
-      showToast(`Imported "${noteData.title}"`);
-    };
-    reader.onerror = () => {
-      setMdImportBusy(false);
-      showToast("Couldn't read that file — try again.");
-    };
-    reader.readAsText(file);
+      reader.onerror = () => resolve({
+        file,
+        text: null
+      });
+      reader.readAsText(file);
+    });
+    Promise.all(files.map(readText)).then(async results => {
+      try {
+        let subject = data.subjects.find(s => s.name === "Imported Notes");
+        let subjects = data.subjects;
+        let tags = data.tags;
+        const newNotes = [];
+        let skipped = 0;
+        for (const {
+          file,
+          text
+        } of results) {
+          if (!text || !text.trim()) {
+            skipped++;
+            continue;
+          }
+          const noteData = buildBrainlyNoteFromMarkdownFile(text, file.name);
+          if (!subject) {
+            subject = {
+              id: uid(),
+              name: "Imported Notes",
+              color: "#00A187",
+              parentId: null,
+              createdAt: nowISO()
+            };
+            subjects = [...subjects, subject];
+          }
+          const resolved = resolveTagIds(noteData.tagNames, tags);
+          tags = resolved.tags;
+          const now = nowISO();
+          newNotes.push({
+            id: uid(),
+            subjectId: subject.id,
+            title: noteData.title,
+            bodyHTML: noteData.bodyHTML,
+            tagIds: resolved.ids,
+            images: noteData.images,
+            color: null,
+            linkedNoteIds: [],
+            createdAt: now,
+            updatedAt: now
+          });
+        }
+        if (!newNotes.length) {
+          showToast(files.length === 1 ? "That file looks empty." : "Those files look empty or couldn't be read.");
+          return;
+        }
+        await persist({
+          ...data,
+          subjects,
+          tags,
+          notes: [...data.notes, ...newNotes]
+        });
+        const skipNote = skipped ? ` (${skipped} empty or unreadable skipped)` : "";
+        showToast(newNotes.length === 1 ? `Imported "${newNotes[0].title}"` : `Imported ${newNotes.length} notes${skipNote}`);
+      } finally {
+        setMdImportBusy(false);
+      }
+    });
   };
 
   // Shared by both the manual "Add article by URL" flow and the
@@ -3304,7 +3324,9 @@ function FilesPage({
     }
   }, "Files"), /*#__PURE__*/React.createElement("h1", null, "Download & upload"), /*#__PURE__*/React.createElement("p", {
     className: "files-lede"
-  }, "Brainly keeps your notes on this device. To carry them with you, download a backup file, keep it in your Google Drive, and upload it on any other device."), /*#__PURE__*/React.createElement("section", {
+  }, "Brainly keeps your notes on this device. To carry them with you, download a backup file, keep it in your Google Drive, and upload it on any other device."), /*#__PURE__*/React.createElement("p", {
+    className: "files-tip"
+  }, /*#__PURE__*/React.createElement("b", null, "Tip:"), " on your phone, every upload button opens Android's file picker \u2014 tap ", /*#__PURE__*/React.createElement("b", null, "Drive"), " there to browse your folders and pick a file. On a computer, Drive for desktop shows your Drive as a drive letter you can browse from the picker."), /*#__PURE__*/React.createElement("section", {
     className: "files-card"
   }, /*#__PURE__*/React.createElement("h2", null, "1 \xB7 Download a backup"), /*#__PURE__*/React.createElement("p", null, "Saves all your subjects, notes, images and flashcards as one file."), /*#__PURE__*/React.createElement("div", {
     className: "files-actions"
@@ -3366,6 +3388,7 @@ function FilesPage({
   }, mdImportBusy ? "Reading file…" : "📝 Markdown (.md)", /*#__PURE__*/React.createElement("input", {
     type: "file",
     accept: ".md,text/markdown,text/plain",
+    multiple: true,
     className: "visually-hidden-file",
     onChange: onMarkdownFile,
     disabled: mdImportBusy
@@ -3374,7 +3397,7 @@ function FilesPage({
     onClick: onAddArticle
   }, "\uD83D\uDD17 Web article")), /*#__PURE__*/React.createElement("ul", {
     className: "files-steps"
-  }, /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Kindle highlights"), " \u2014 a Kindle Notebook export (.html) or ", /*#__PURE__*/React.createElement("i", null, "My Clippings.txt"), ". Lands in a \u201CKindle Highlights\u201D subject."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "PDF"), " \u2014 pulls out the text (and, if you like, page images). Lands in \u201CPDF Imports\u201D."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Markdown"), " \u2014 a .md file from Obsidian, Notion or anywhere else. Lands in \u201CImported Notes\u201D."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Web article"), " \u2014 paste a link and Brainly saves a readable copy. Lands in \u201CSaved Articles\u201D."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Share from other apps"), " \u2014 on Android, use ", /*#__PURE__*/React.createElement("b", null, "Share \u2192 Brainly"), " in any app to drop text or a link into your \u201CReview\u201D subject."))), /*#__PURE__*/React.createElement("p", {
+  }, /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Kindle highlights"), " \u2014 a Kindle Notebook export (.html) or ", /*#__PURE__*/React.createElement("i", null, "My Clippings.txt"), ". Lands in a \u201CKindle Highlights\u201D subject."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "PDF"), " \u2014 pulls out the text (and, if you like, page images). Lands in \u201CPDF Imports\u201D."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Markdown"), " \u2014 .md files from Obsidian, Notion or anywhere else. You can pick several at once (for example a whole folder of notes). Lands in \u201CImported Notes\u201D."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Web article"), " \u2014 paste a link and Brainly saves a readable copy. Lands in \u201CSaved Articles\u201D."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Share from other apps"), " \u2014 on Android, use ", /*#__PURE__*/React.createElement("b", null, "Share \u2192 Brainly"), " in any app to drop text or a link into your \u201CReview\u201D subject."))), /*#__PURE__*/React.createElement("p", {
     className: "files-note"
   }, "Everything stays on this device unless you download it. Clearing this site's data, or uninstalling the app, deletes your notes \u2014 so keep a backup file in Drive."));
 }
@@ -6838,6 +6861,7 @@ function Styles() {
       .files-actions { display: flex; flex-wrap: wrap; gap: 8px; }
       .files-steps { margin: 2px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; line-height: 1.55; color: var(--ink); }
       .files-steps code { font-size: 12px; background: var(--soft); padding: 1px 5px; border-radius: 4px; }
+      .files-tip { margin: 0; padding: 10px 14px; background: var(--soft); border-radius: 10px; color: var(--ink); font-size: 13px; line-height: 1.5; }
       .files-note { margin: 0 0 24px; font-size: 12.5px; color: var(--muted); line-height: 1.5; }
       .pin-lock-section { margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
       .pin-lock-actions { display: flex; gap: 8px; }
