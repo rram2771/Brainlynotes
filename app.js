@@ -2129,7 +2129,7 @@ function Brainly() {
     color,
     subjectId,
     linkedNoteIds
-  }) => {
+  }, opts = {}) => {
     const targetSubjectId = subjectId || targetNote && targetNote.subjectId || selectedSubjectId;
     if (!targetSubjectId) return;
     const {
@@ -2186,12 +2186,27 @@ function Brainly() {
     const bits = [];
     if (sync.addedCount) bits.push(`${sync.addedCount} card${sync.addedCount === 1 ? "" : "s"} linked`);
     if (sync.removedCount) bits.push(`${sync.removedCount} removed`);
-    showToast("Note saved" + (bits.length ? " — " + bits.join(", ") : ""));
+    if (!opts.silent) showToast("Note saved" + (bits.length ? " — " + bits.join(", ") : ""));
     return savedNoteId;
   };
-  const quickAddNote = async (title, bodyHTML, tagNames, color, images) => {
+  const quickAddNote = async (title, bodyHTML, tagNames, color, images, savedId) => {
     if (!selectedSubjectId) throw new Error("Pick a subject first");
     if (!noteHasContent(title, bodyHTML, images)) return;
+    if (savedId) {
+      // An autosave already created this note; finishing updates it instead of adding a second.
+      await saveNote({
+        id: savedId,
+        subjectId: selectedSubjectId
+      }, {
+        title,
+        bodyHTML,
+        tagNames,
+        images: images || [],
+        color: color || null,
+        subjectId: selectedSubjectId
+      });
+      return;
+    }
     const {
       tags,
       ids
@@ -2843,7 +2858,17 @@ function Brainly() {
   }, "Study ", dueCards.length > 0 && /*#__PURE__*/React.createElement("span", {
     className: "tab-badge"
   }, dueCards.length))), tab === "notes" ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(QuickAddNote, {
+    key: selectedSubject.id,
     onAdd: quickAddNote,
+    onAutoSave: (p, savedId) => saveNote(savedId ? {
+      id: savedId,
+      subjectId: selectedSubject.id
+    } : null, {
+      ...p,
+      subjectId: selectedSubject.id
+    }, {
+      silent: true
+    }),
     onViewImage: setLightboxImage,
     onImageError: () => showToast("Couldn't load that image — try saving it to your device first, then use + Add image."),
     onSaveError: showToast
@@ -2994,8 +3019,17 @@ function Brainly() {
       setEditingNote(null);
       setSplitPane(null);
     },
-    onSave: async payload => {
-      await saveNote(editingNote, payload);
+    onAutoSave: (payload, savedId) => saveNote(savedId ? {
+      ...editingNote,
+      id: savedId
+    } : editingNote, payload, {
+      silent: true
+    }),
+    onSave: async (payload, savedId) => {
+      await saveNote(savedId ? {
+        ...editingNote,
+        id: savedId
+      } : editingNote, payload);
       setEditingNote(null);
       setSplitPane(null);
     },
@@ -3024,8 +3058,17 @@ function Brainly() {
     allNotes: data.notes,
     subjects: data.subjects,
     onCancel: () => setSplitPane(null),
-    onSave: async payload => {
-      await saveNote(splitPane.note, payload);
+    onAutoSave: (payload, savedId) => saveNote(savedId ? {
+      ...splitPane.note,
+      id: savedId
+    } : splitPane.note, payload, {
+      silent: true
+    }),
+    onSave: async (payload, savedId) => {
+      await saveNote(savedId ? {
+        ...splitPane.note,
+        id: savedId
+      } : splitPane.note, payload);
       setSplitPane(null);
     },
     onCreateCard: (noteId, front, back) => createCardFromHighlight(noteId, front, back),
@@ -5207,6 +5250,7 @@ function OcclusionCreator({
 
 function QuickAddNote({
   onAdd,
+  onAutoSave,
   onViewImage,
   onImageError,
   onSaveError
@@ -5223,6 +5267,12 @@ function QuickAddNote({
   const [showDraw, setShowDraw] = useState(false);
   const [resetKey, setResetKey] = useState(0);
   const reset = () => {
+    // Flush first so anything typed but not yet autosaved is kept, then forget this note so the
+    // next one starts fresh. (Closing the box therefore keeps what you wrote — it's a saved note.)
+    flushAutoSave();
+    savedIdRef.current = null;
+    lastSavedJsonRef.current = "";
+    setAutoSaved(false);
     setTitle("");
     setBodyHTML("");
     setTagInput("");
@@ -5262,6 +5312,54 @@ function QuickAddNote({
   } : img));
   const [annotatingThumb, setAnnotatingThumb] = useState(null); // { id, dataUrl } | null
 
+  // ---- Autosave (same idea as the full note editor) ----
+  // The note is created ~1s after you stop typing, and again when you leave the subject, close
+  // the box, or the app goes to the background — so nothing typed here is lost. Adding then
+  // updates that same note instead of creating a second one.
+  const savedIdRef = useRef(null);
+  const saveChainRef = useRef(Promise.resolve());
+  const lastSavedJsonRef = useRef("");
+  const latestRef = useRef(null);
+  const onAutoSaveRef = useRef(onAutoSave);
+  onAutoSaveRef.current = onAutoSave;
+  const [autoSaved, setAutoSaved] = useState(false);
+  latestRef.current = {
+    title: title.trim(),
+    bodyHTML,
+    tagNames,
+    images,
+    color
+  };
+  const flushAutoSave = () => {
+    const p = latestRef.current;
+    if (!p || !onAutoSaveRef.current || !noteHasContent(p.title, p.bodyHTML, p.images)) return;
+    const json = JSON.stringify(p);
+    if (json === lastSavedJsonRef.current) return;
+    lastSavedJsonRef.current = json;
+    saveChainRef.current = saveChainRef.current.then(() => onAutoSaveRef.current(p, savedIdRef.current)).then(id => {
+      if (id && !savedIdRef.current) savedIdRef.current = id;
+      setAutoSaved(true);
+    }).catch(() => {
+      lastSavedJsonRef.current = "";
+      if (onSaveError) onSaveError("Couldn't autosave your note — it isn't saved yet.");
+    });
+  };
+  useEffect(() => {
+    const t = setTimeout(flushAutoSave, 1000);
+    return () => clearTimeout(t);
+  }, [title, bodyHTML, tagNames, images, color]);
+  useEffect(() => {
+    const onHide = () => {
+      if (document.visibilityState === "hidden") flushAutoSave();
+    };
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", flushAutoSave);
+    return () => {
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", flushAutoSave);
+      flushAutoSave();
+    };
+  }, []);
   const handleSubmit = async () => {
     if (!noteHasContent(title, bodyHTML, images)) {
       reset();
@@ -5270,7 +5368,9 @@ function QuickAddNote({
     // Await + only reset() on success — otherwise a failed save (onAdd rejects) still
     // cleared the form, silently losing what was typed with no visible sign anything went wrong.
     try {
-      await onAdd(title, bodyHTML, tagNames, color, images);
+      await saveChainRef.current; // reuse the note an in-flight autosave is creating
+      await onAdd(title, bodyHTML, tagNames, color, images, savedIdRef.current);
+      lastSavedJsonRef.current = JSON.stringify(latestRef.current); // reset() below flushes; this marks the content as already saved
       reset();
     } catch (e) {
       if (onSaveError) onSaveError(`Couldn't save note: ${e && e.message ? e.message : e}`);
@@ -5410,6 +5510,7 @@ function NoteEditor({
   subjects,
   onCancel,
   onSave,
+  onAutoSave,
   onCreateCard,
   onOccludeImage,
   onViewImage,
@@ -5566,20 +5667,73 @@ function NoteEditor({
     setNoteSearch("");
   };
   const removeLink = noteId => setLinkedNoteIds(cur => cur.filter(id => id !== noteId));
+
+  // ---- Autosave ----
+  // Nothing used to be saved until "Save note" was pressed, so closing the editor, opening a
+  // split pane, or the app being backgrounded and killed lost everything typed. Now the note is
+  // saved quietly ~1s after you stop typing, when the editor closes, and when the app goes to
+  // the background. A brand-new note is created on its first autosave, and later saves (and the
+  // final Save button) update that same note instead of making a duplicate.
+  const savedIdRef = useRef(note.id || null);
+  const saveChainRef = useRef(Promise.resolve());
+  const lastSavedJsonRef = useRef(null);
+  const latestPayloadRef = useRef(null);
+  const onAutoSaveRef = useRef(onAutoSave);
+  onAutoSaveRef.current = onAutoSave;
+  const [autoSaveStatus, setAutoSaveStatus] = useState("");
+  const currentPayload = {
+    title: title.trim(),
+    bodyHTML,
+    tagNames,
+    images,
+    color,
+    subjectId,
+    linkedNoteIds
+  };
+  latestPayloadRef.current = currentPayload;
+  if (lastSavedJsonRef.current === null) {
+    // What's already saved: an existing note as opened, or nothing for a brand-new one.
+    lastSavedJsonRef.current = note.id ? JSON.stringify(currentPayload) : "";
+  }
+  const flushAutoSave = () => {
+    const p = latestPayloadRef.current;
+    if (!p || !onAutoSaveRef.current || !noteHasContent(p.title, p.bodyHTML, p.images)) return;
+    const json = JSON.stringify(p);
+    if (json === lastSavedJsonRef.current) return;
+    lastSavedJsonRef.current = json;
+    // Chained so two saves can never run at once (which could create a new note twice).
+    saveChainRef.current = saveChainRef.current.then(() => onAutoSaveRef.current(p, savedIdRef.current)).then(id => {
+      if (id && !savedIdRef.current) savedIdRef.current = id;
+      setAutoSaveStatus("Saved");
+    }).catch(() => {
+      lastSavedJsonRef.current = null; // try again on the next change
+      setSaveMessage("Couldn't autosave — your changes aren't saved yet.");
+    });
+  };
+  useEffect(() => {
+    const t = setTimeout(flushAutoSave, 1000);
+    return () => clearTimeout(t);
+  }, [title, bodyHTML, tagNames, images, color, subjectId, linkedNoteIds]);
+  useEffect(() => {
+    const onHide = () => {
+      if (document.visibilityState === "hidden") flushAutoSave();
+    };
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", flushAutoSave);
+    return () => {
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", flushAutoSave);
+      flushAutoSave(); // editor closing by any route (✕, Cancel, opening a split pane...)
+    };
+  }, []);
   const handleSave = async () => {
     if (!noteHasContent(title, bodyHTML, images)) return;
     // onSave is async; without this try/catch a failure here would be a silently
     // swallowed promise rejection — the tap would look like it did nothing at all.
     try {
-      await onSave({
-        title: title.trim(),
-        bodyHTML,
-        tagNames,
-        images,
-        color,
-        subjectId,
-        linkedNoteIds
-      });
+      await saveChainRef.current; // let any in-flight autosave finish so we reuse its note
+      lastSavedJsonRef.current = JSON.stringify(currentPayload);
+      await onSave(currentPayload, savedIdRef.current);
     } catch (e) {
       setSaveMessage(`Couldn't save: ${e && e.message ? e.message : e}`);
     }
@@ -5636,7 +5790,9 @@ function NoteEditor({
     onClick: onCancel
   }, isSplitPane ? "✕ Close pane" : "✕"))), saveMessage && /*#__PURE__*/React.createElement("p", {
     className: "note-error"
-  }, saveMessage), splitPickerOpen && /*#__PURE__*/React.createElement("div", {
+  }, saveMessage), !saveMessage && autoSaveStatus && /*#__PURE__*/React.createElement("p", {
+    className: "note-autosave"
+  }, "\u2713 ", autoSaveStatus, " automatically"), splitPickerOpen && /*#__PURE__*/React.createElement("div", {
     className: "split-picker-wrap"
   }, /*#__PURE__*/React.createElement("input", {
     className: "link-search-input",
@@ -6852,6 +7008,7 @@ function Styles() {
       .icon-toggle-btn.on { color: var(--primary-dark); border-color: var(--primary); background: var(--soft); }
 
       .note-error { font-size: 12px; color: #E8896B; margin: 0; padding: 0 16px; }
+      .note-autosave { font-size: 11.5px; color: var(--muted); margin: 0; padding: 0 16px; }
       .files-page { max-width: 760px; display: flex; flex-direction: column; gap: 16px; }
       .files-page h1 { margin: 0; font-size: 28px; font-weight: 700; }
       .files-lede { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.55; }
