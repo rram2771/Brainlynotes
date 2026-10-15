@@ -1,4 +1,4 @@
-const CACHE_NAME = "brainly-shell-v73";
+const CACHE_NAME = "brainly-shell-v74";
 const SHELL_FILES = ["./", "./index.html", "./app.js", "./manifest.json", "./icon.svg"];
 
 self.addEventListener("install", (event) => {

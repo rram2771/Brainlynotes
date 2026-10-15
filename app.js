@@ -251,6 +251,16 @@ function htmlToPlainText(html) {
   return text.replace(/\n{3,}/g, "\n\n").trim();
 }
 
+// Highlighting was removed from the app. This takes any old <mark> highlights off a note
+// body and keeps their text.
+function stripHighlights(html) {
+  let out = html || "";
+  for (let i = 0; i < 4 && /<mark\b/i.test(out); i++) {
+    out = out.replace(/<mark\b[^>]*>([\s\S]*?)<\/mark>/gi, "$1");
+  }
+  return out;
+}
+
 // Whether a note has anything worth saving. Checking typed text alone (as every save path
 // used to) treats a note that's only a title plus pasted/inserted images — e.g. an EKG strip
 // titled "PVC" — as empty, so it was silently discarded on Add with no message at all.
@@ -1004,7 +1014,7 @@ function buildBrainlyNoteFromKindleNotebook(parsed) {
       return;
     }
     const noteColor = e.color && KINDLE_TO_NOTE_HIGHLIGHT_COLOR[e.color] ? KINDLE_TO_NOTE_HIGHLIGHT_COLOR[e.color] : "yellow";
-    bodyParts.push(`<p><mark class="note-highlight note-highlight-${noteColor}">${escapeHTML(e.text)}</mark></p>`);
+    bodyParts.push(`<p>${escapeHTML(e.text)}</p>`);
     if (e.linkedNote) bodyParts.push(`<p>${escapeHTML(e.linkedNote)}</p>`);
   });
   return {
@@ -1036,7 +1046,7 @@ function buildBrainlyNotesFromKindleClippings(entries) {
   return Array.from(byTitle.values()).map(book => {
     const bodyParts = book.items.map(e => {
       if (e.type === "NOTE") return `<p>${escapeHTML(e.content || "")}</p>`;
-      return `<p><mark class="note-highlight note-highlight-yellow">${escapeHTML(e.content || "")}</mark></p>`;
+      return `<p>${escapeHTML(e.content || "")}</p>`;
     });
     return {
       title: book.title,
@@ -1211,6 +1221,21 @@ function Brainly() {
         }
       } catch (e) {
         // no existing data yet
+      }
+      // Take old highlights off existing notes (the text stays) and save the cleaned copy once.
+      if (loaded.notes.some(n => /<mark\b/i.test(n.bodyHTML || ""))) {
+        loaded = {
+          ...loaded,
+          notes: loaded.notes.map(n => ({
+            ...n,
+            bodyHTML: stripHighlights(n.bodyHTML)
+          }))
+        };
+        try {
+          await storage.set(STORAGE_KEY, JSON.stringify(loaded));
+        } catch (e) {
+          // the cleaned copy is still shown; it will be saved with the next change
+        }
       }
       setData(loaded);
       try {
@@ -3966,7 +3991,6 @@ function BulkMoveModal({
 function RichTextEditor({
   initialHTML,
   onChange,
-  onHighlight,
   placeholder,
   onImageError,
   onOccludeImage,
@@ -4068,52 +4092,6 @@ function RichTextEditor({
       document.removeEventListener("click", handleOutsideClick, true);
     };
   }, []);
-
-  // Takes highlights off but keeps the text: unwraps every <mark> the selection touches,
-  // or the one the cursor is sitting in when nothing is selected.
-  const handleRemoveHighlight = () => {
-    const root = editorRef.current;
-    const sel = window.getSelection();
-    if (!root || !sel || sel.rangeCount === 0) return;
-    const range = sel.getRangeAt(0);
-    if (!root.contains(range.commonAncestorContainer)) return;
-    let marks = Array.from(root.querySelectorAll("mark")).filter(m => range.intersectsNode(m));
-    if (marks.length === 0) {
-      const n = range.startContainer;
-      const host = n.nodeType === 1 ? n : n.parentElement;
-      const m = host && host.closest ? host.closest("mark") : null;
-      if (m && root.contains(m)) marks = [m];
-    }
-    if (marks.length === 0) return;
-    marks.forEach(m => {
-      const parent = m.parentNode;
-      if (!parent) return;
-      while (m.firstChild) parent.insertBefore(m.firstChild, m);
-      parent.removeChild(m);
-      parent.normalize();
-    });
-    onChange(root.innerHTML);
-  };
-  const handleHighlight = variant => {
-    const sel = window.getSelection();
-    if (!sel || sel.isCollapsed || !editorRef.current) return;
-    const range = sel.getRangeAt(0);
-    if (!editorRef.current.contains(range.commonAncestorContainer)) return;
-    const text = sel.toString().trim();
-    if (!text) return;
-    const mark = document.createElement("mark");
-    mark.className = "note-highlight note-highlight-" + variant;
-    try {
-      range.surroundContents(mark);
-    } catch (e) {
-      const frag = range.extractContents();
-      mark.appendChild(frag);
-      range.insertNode(mark);
-    }
-    sel.removeAllRanges();
-    onChange(editorRef.current.innerHTML);
-    if (onHighlight) onHighlight(text);
-  };
   const handlePaste = e => {
     const files = imageFilesFromPasteOrDrop(e.clipboardData.items);
     if (files.length) {
@@ -4325,37 +4303,7 @@ function RichTextEditor({
       insertImageAtCursor(e.target.files && e.target.files[0]);
       e.target.value = "";
     }
-  })), onHighlight && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
-    className: "rte-toolbar-divider"
-  }), /*#__PURE__*/React.createElement("span", {
-    className: "rte-highlight-group",
-    title: "Select text, then tap a color to highlight it"
-  }, /*#__PURE__*/React.createElement("button", {
-    type: "button",
-    className: "rte-highlight-swatch yellow",
-    title: "Highlight \u2014 general",
-    onMouseDown: e => e.preventDefault(),
-    onClick: () => handleHighlight("yellow")
-  }), /*#__PURE__*/React.createElement("button", {
-    type: "button",
-    className: "rte-highlight-swatch red",
-    title: "Highlight \u2014 important",
-    onMouseDown: e => e.preventDefault(),
-    onClick: () => handleHighlight("red")
-  }), /*#__PURE__*/React.createElement("button", {
-    type: "button",
-    className: "rte-highlight-swatch green",
-    title: "Highlight \u2014 supporting",
-    onMouseDown: e => e.preventDefault(),
-    onClick: () => handleHighlight("green")
-  }), /*#__PURE__*/React.createElement("button", {
-    type: "button",
-    className: "rte-highlight-clear",
-    title: "Remove highlight, keep the text \u2014 select it, or tap inside it",
-    "aria-label": "Remove highlight",
-    onMouseDown: e => e.preventDefault(),
-    onClick: handleRemoveHighlight
-  }, "\u2715")))), /*#__PURE__*/React.createElement("div", {
+  }))), /*#__PURE__*/React.createElement("div", {
     ref: editorRef,
     className: "rte-body" + (tall ? " rte-body-tall" : ""),
     contentEditable: true,
@@ -4411,34 +4359,7 @@ function RichTextEditor({
     title: "Plain paragraph",
     onMouseDown: e => e.preventDefault(),
     onClick: () => applyCmd("formatBlock", "P")
-  }, "\xB6"), onHighlight && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
-    className: "rte-toolbar-divider"
-  }), /*#__PURE__*/React.createElement("button", {
-    type: "button",
-    className: "rte-highlight-swatch yellow",
-    title: "Highlight \u2014 general",
-    onMouseDown: e => e.preventDefault(),
-    onClick: () => handleHighlight("yellow")
-  }), /*#__PURE__*/React.createElement("button", {
-    type: "button",
-    className: "rte-highlight-swatch red",
-    title: "Highlight \u2014 important",
-    onMouseDown: e => e.preventDefault(),
-    onClick: () => handleHighlight("red")
-  }), /*#__PURE__*/React.createElement("button", {
-    type: "button",
-    className: "rte-highlight-swatch green",
-    title: "Highlight \u2014 supporting",
-    onMouseDown: e => e.preventDefault(),
-    onClick: () => handleHighlight("green")
-  }), /*#__PURE__*/React.createElement("button", {
-    type: "button",
-    className: "rte-highlight-clear",
-    title: "Remove highlight, keep the text",
-    "aria-label": "Remove highlight",
-    onMouseDown: e => e.preventDefault(),
-    onClick: handleRemoveHighlight
-  }, "\u2715")), /*#__PURE__*/React.createElement("span", {
+  }, "\xB6"), /*#__PURE__*/React.createElement("span", {
     className: "rte-toolbar-divider"
   }), /*#__PURE__*/React.createElement("button", {
     type: "button",
@@ -5909,17 +5830,11 @@ function NoteEditor({
     placeholder: "Write or paste your note here\u2026",
     onChange: setBodyHTML,
     onImageError: onImageError,
-    onHighlight: note.id ? text => setPendingHighlight({
-      front: text,
-      back: ""
-    }) : null,
     onOccludeImage: note.id && onOccludeImage ? dataUrl => onOccludeImage(dataUrl, note.id) : null,
     tall: true
   }), /*#__PURE__*/React.createElement("p", {
     className: "hint-line"
-  }, "Tip: a line like ", /*#__PURE__*/React.createElement("b", null, "question :: answer"), " auto-creates a linked flashcard on save."), !note.id && /*#__PURE__*/React.createElement("p", {
-    className: "hint-line"
-  }, "Save this note once to unlock highlight \u2192 card."), pendingHighlight && /*#__PURE__*/React.createElement("div", {
+  }, "Tip: a line like ", /*#__PURE__*/React.createElement("b", null, "question :: answer"), " auto-creates a linked flashcard on save."), pendingHighlight && /*#__PURE__*/React.createElement("div", {
     className: "highlight-capture"
   }, /*#__PURE__*/React.createElement("div", {
     className: "highlight-capture-front"
@@ -6471,7 +6386,7 @@ function StudyPanel({
     value: n.id
   }, n.title)))), cards.length === 0 && /*#__PURE__*/React.createElement("p", {
     className: "study-hint"
-  }, "No cards yet \u2014 tap Import to paste term/definition pairs, or highlight text in a note to create one."), cards.length > 0 && activeCount === 0 && /*#__PURE__*/React.createElement("p", {
+  }, "No cards yet \u2014 tap Import to paste term/definition pairs, or write a \"question :: answer\" line in a note to create one."), cards.length > 0 && activeCount === 0 && /*#__PURE__*/React.createElement("p", {
     className: "study-hint"
   }, scope === "selected" ? "Nothing selected yet — check a few cards below." : `No cards in this scope yet — try "All", or star a few cards.`), cards.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     className: "term-table-toolbar"
@@ -6721,7 +6636,7 @@ function SplitCardsPanel({
     className: "split-cards-list"
   }, cards.length === 0 && /*#__PURE__*/React.createElement("p", {
     className: "study-hint"
-  }, "No cards yet \u2014 highlight text or write a \"question :: answer\" line in the note to create one."), cards.map(c => /*#__PURE__*/React.createElement("div", {
+  }, "No cards yet \u2014 write a \"question :: answer\" line in the note to create one."), cards.map(c => /*#__PURE__*/React.createElement("div", {
     key: c.id,
     className: "term-row"
   }, /*#__PURE__*/React.createElement("div", {
