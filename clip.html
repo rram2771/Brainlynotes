@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Brainly web clipper</title>
+<style>
+  :root { --ink:#17171B; --muted:#6C6C75; --primary:#3E7CAB; --border:#E5E4EA; --bg:#EEF4F8; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:linear-gradient(180deg,#EAF2F7,#fff 70%); color:var(--ink); font:16px/1.55 'Urbanist', system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { font-weight: 300; font-size: 34px; margin: 0 0 8px; letter-spacing: -0.02em; }
+  h2 { font-size: 18px; margin: 0 0 8px; }
+  p { margin: 0 0 12px; color: var(--muted); }
+  .card { background:#fff; border-radius: 28px; padding: 22px 24px; margin: 18px 0; box-shadow: 0 8px 24px rgba(23,23,27,.07); }
+  a.bm { display:inline-block; background:var(--primary); color:#fff; padding:13px 24px; border-radius:999px; font-weight:700; text-decoration:none; cursor:grab; box-shadow:0 4px 12px rgba(62,124,171,.28); }
+  ol { margin: 8px 0 0; padding-left: 22px; color: var(--ink); }
+  li { margin-bottom: 6px; }
+  .note { background:#F6EDC4; border-radius:16px; padding:12px 16px; color:#5b4a12; font-size:14px; }
+  code { background:#EEF4F8; padding:1px 6px; border-radius:6px; font-size:13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Clip any web page into Brainly</h1>
+  <p>Turns an article, guideline or case page into a note you can load into Brainly. Nothing leaves your computer: the clipper runs in the page you're on and just saves a small file.</p>
+
+  <div class="card">
+    <h2>1 · Add the clipper to your browser</h2>
+    <p>Drag this button up to your bookmarks bar (show the bar with <code>Ctrl+Shift+B</code>).</p>
+    <p><a class="bm" id="bm" href="#">✂ Clip to Brainly</a></p>
+  </div>
+
+  <div class="card">
+    <h2>2 · Use it</h2>
+    <ol>
+      <li>Open any article or case page (LITFL, a guideline, a journal page).</li>
+      <li>Optional: select just the part you want. With nothing selected it clips the main article.</li>
+      <li>Click <b>Clip to Brainly</b> in your bookmarks bar.</li>
+      <li>It asks whether to also build <i>Question :: Answer</i> flashcards from the headings. Say OK or Cancel.</li>
+      <li>A <code>brainly-clip-….json</code> file downloads.</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h2>3 · Load it in Brainly</h2>
+    <ol>
+      <li>Open Brainly → <b>Files</b> → <b>Upload a subject file</b> and choose the clip file. You can do this on your phone too (put the file in Drive first).</li>
+      <li>The note lands in a subject called <b>Web clippings</b>, with its source link at the top. Clipping the same page again updates that note instead of duplicating it.</li>
+      <li>Any <code>question :: answer</code> lines in the note become flashcards in that subject's deck. Edit the note or the cards whenever you like.</li>
+      <li>To link it to another note, type the other note's title in the note, or use the link option in the editor.</li>
+    </ol>
+  </div>
+
+  <p class="note">Some sites block bookmarklets. If nothing happens, select the text and use <b>Share → Brainly</b> on your phone, or paste it into a new note. Respect each site's licence: clip for your own study and keep the source line.</p>
+</main>
+
+<script>
+  // The bookmarklet. It is written as a normal function so it stays readable; the page turns it
+  // into the javascript: link above at load time.
+  function brainlyClip() {
+    try {
+      var MAX = 20000;
+      var url = location.href.split('#')[0];
+      var host = location.hostname.replace(/^www\./, '');
+      var title = (document.title || host).replace(/\s+/g, ' ').trim().slice(0, 140);
+
+      // 1. what to clip: the selection, else the main article, else the densest block of paragraphs
+      var root = null;
+      var sel = window.getSelection();
+      if (sel && !sel.isCollapsed && sel.rangeCount) {
+        root = document.createElement('div');
+        root.appendChild(sel.getRangeAt(0).cloneContents());
+      } else {
+        var picks = ['article', 'main', '[role="main"]', '.entry-content', '.post-content', '.article-content', '#content', '.content'];
+        for (var i = 0; i < picks.length && !root; i++) {
+          var e = document.querySelector(picks[i]);
+          if (e && e.innerText && e.innerText.trim().length > 400) root = e;
+        }
+        if (!root) {
+          var best = null, bestLen = 0;
+          var blocks = document.querySelectorAll('div, section');
+          for (var j = 0; j < blocks.length; j++) {
+            var own = 0, kids = blocks[j].children;
+            for (var k = 0; k < kids.length; k++) if (kids[k].tagName === 'P') own += kids[k].innerText.length;
+            if (own > bestLen) { best = blocks[j]; bestLen = own; }
+          }
+          root = best || document.body;
+        }
+      }
+
+      // 2. turn it into the small set of tags Brainly's editor understands
+      var SKIP = /^(script|style|noscript|nav|aside|footer|form|iframe|button|svg|header|select|input|textarea|canvas|video|audio)$/;
+      var JUNK = /(share|social|comment|related|sidebar|advert|cookie|newsletter|subscribe|breadcrumb|popup|modal|promo|toolbar)/i;
+      var imgCount = 0, len = 0;
+      function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+      function walk(n) {
+        if (len > MAX) return '';
+        if (n.nodeType === 3) { var t = n.nodeValue.replace(/\s+/g, ' '); len += t.length; return esc(t); }
+        if (n.nodeType !== 1) return '';
+        var tag = n.tagName.toLowerCase();
+        if (SKIP.test(tag)) return '';
+        var cls = (typeof n.className === 'string' ? n.className : '') + ' ' + (n.id || '');
+        if (JUNK.test(cls) && n !== root) return '';
+        if (tag === 'img') {
+          var src = n.currentSrc || n.src;
+          if (imgCount < 4 && src && /^https?:/.test(src) && (n.naturalWidth || n.width) >= 150) {
+            imgCount++;
+            return '<p><img src="' + src.replace(/"/g, '&quot;') + '"></p>';
+          }
+          return '';
+        }
+        var inner = '';
+        for (var c = n.firstChild; c; c = c.nextSibling) inner += walk(c);
+        var tr = inner.trim();
+        switch (tag) {
+          case 'h1': case 'h2': case 'h3': case 'h4': case 'h5': case 'h6':
+            return tr ? '<h3>' + tr + '</h3>' : '';
+          case 'p': case 'blockquote': case 'tr': case 'pre':
+            return tr ? '<p>' + tr + '</p>' : '';
+          case 'br': return '<br>';
+          case 'ul': case 'ol': return '<' + tag + '>' + inner + '</' + tag + '>';
+          case 'li': return '<li>' + tr + '</li>';
+          case 'b': case 'strong': return tr ? '<b>' + inner + '</b>' : '';
+          case 'i': case 'em': return tr ? '<i>' + inner + '</i>' : '';
+          case 'td': case 'th': return tr + ' | ';
+          case 'div': case 'section': case 'article': case 'main': case 'figure': case 'figcaption':
+            return (tr && !/<(p|h3|ul|ol|li)\b/.test(inner)) ? '<p>' + tr + '</p>' : inner;
+          default: return inner;
+        }
+      }
+      var body = walk(root);
+      if (!body.replace(/<[^>]+>/g, '').trim()) { alert('Brainly clipper: nothing readable found on this page. Try selecting some text first.'); return; }
+
+      // 3. optional flashcards: each heading plus the first paragraph under it
+      var cards = '';
+      if (confirm('Also build "Question :: Answer" flashcards from the headings on this page?')) {
+        var heads = root.querySelectorAll('h2, h3, h4');
+        var lines = [];
+        for (var h = 0; h < heads.length && lines.length < 40; h++) {
+          var q = heads[h].innerText.replace(/\s+/g, ' ').trim();
+          var el = heads[h].nextElementSibling, a = '';
+          while (el && !a) {
+            if (/^h[1-6]$/i.test(el.tagName)) break;
+            var tx = (el.innerText || '').replace(/\s+/g, ' ').trim();
+            if (tx.length > 25) a = tx.slice(0, 280);
+            el = el.nextElementSibling;
+          }
+          if (q && a && q.length < 120) lines.push('<p>' + esc(q) + ' :: ' + esc(a) + '</p>');
+        }
+        if (lines.length) cards = '<h3>Flashcards</h3>' + lines.join('');
+      }
+
+      // 4. the file: same shape as a Brainly subject export, so it can be loaded with
+      //    Files > Upload a subject file (re-clipping the same page updates its note)
+      var h32 = 5381;
+      for (var s = 0; s < url.length; s++) h32 = ((h32 << 5) + h32 + url.charCodeAt(s)) | 0;
+      var now = new Date().toISOString();
+      var source = '<p><i>Source: <a href="' + url.replace(/"/g, '&quot;') + '">' + esc(host) + '</a> · clipped ' + now.slice(0, 10) + '</i></p>';
+      var payload = {
+        subjects: [{ id: 'web-clippings', name: 'Web clippings', color: '#3E7CAB', parentId: null, createdAt: now }],
+        tags: [{ id: 'tag-clipping', name: 'clipping' }],
+        notes: [{
+          id: 'clip-' + (h32 >>> 0).toString(36),
+          subjectId: 'web-clippings',
+          title: title,
+          bodyHTML: source + body + cards,
+          tagIds: ['tag-clipping'],
+          images: [],
+          color: null,
+          linkedNoteIds: [],
+          createdAt: now,
+          updatedAt: now
+        }],
+        cards: []
+      };
+      var slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'page';
+      var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      var a2 = document.createElement('a');
+      a2.href = URL.createObjectURL(blob);
+      a2.download = 'brainly-clip-' + slug + '.json';
+      document.body.appendChild(a2);
+      a2.click();
+      setTimeout(function () { a2.remove(); }, 500);
+    } catch (err) {
+      alert('Brainly clipper could not read this page: ' + err.message);
+    }
+  }
+  document.getElementById('bm').href = 'javascript:(' + encodeURIComponent(brainlyClip.toString()) + ')()';
+</script>
+</body>
+</html>

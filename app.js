@@ -2439,12 +2439,18 @@ function Brainly() {
       ...s,
       parentId: null
     } : s);
+    let mergedCards = mergeArrayById(data.cards, parsed.cards);
+    // Any "question :: answer" line in an imported note becomes a card in that subject's deck,
+    // exactly as if the note had been saved here (so clipped pages arrive with their cards).
+    remappedNotes.forEach(n => {
+      mergedCards = syncAutoCardsFromNote(mergedCards, n.id, n.subjectId, n.bodyHTML, htmlToPlainText, nowISO, uid).cards;
+    });
     const merged = {
       ...data,
       subjects: mergedSubjects,
       tags: [...data.tags, ...tagsToAdd],
       notes: mergeArrayById(data.notes, remappedNotes),
-      cards: mergeArrayById(data.cards, parsed.cards)
+      cards: mergedCards
     };
     await persist(merged);
   };
@@ -3477,7 +3483,11 @@ function FilesPage({
     onClick: onAddArticle
   }, "\uD83D\uDD17 Web article")), /*#__PURE__*/React.createElement("ul", {
     className: "files-steps"
-  }, /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Kindle highlights"), " \u2014 a Kindle Notebook export (.html) or ", /*#__PURE__*/React.createElement("i", null, "My Clippings.txt"), ". Lands in a \u201CKindle Highlights\u201D subject."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "PDF"), " \u2014 pulls out the text (and, if you like, page images). Lands in \u201CPDF Imports\u201D."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Markdown"), " \u2014 .md files from Obsidian, Notion or anywhere else. You can pick several at once (for example a whole folder of notes). Lands in \u201CImported Notes\u201D."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Web article"), " \u2014 paste a link and Brainly saves a readable copy. Lands in \u201CSaved Articles\u201D."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Share from other apps"), " \u2014 on Android, use ", /*#__PURE__*/React.createElement("b", null, "Share \u2192 Brainly"), " in any app to drop text or a link into your \u201CReview\u201D subject."))), /*#__PURE__*/React.createElement("p", {
+  }, /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Kindle highlights"), " \u2014 a Kindle Notebook export (.html) or ", /*#__PURE__*/React.createElement("i", null, "My Clippings.txt"), ". Lands in a \u201CKindle Highlights\u201D subject."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "PDF"), " \u2014 pulls out the text (and, if you like, page images). Lands in \u201CPDF Imports\u201D."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Markdown"), " \u2014 .md files from Obsidian, Notion or anywhere else. You can pick several at once (for example a whole folder of notes). Lands in \u201CImported Notes\u201D."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Web article"), " \u2014 paste a link and Brainly saves a readable copy. Lands in \u201CSaved Articles\u201D."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Clip any web page"), " \u2014 open ", /*#__PURE__*/React.createElement("a", {
+    href: "https://rram2771.github.io/Brainlynotes/clip.html",
+    target: "_blank",
+    rel: "noopener"
+  }, "the clipper page"), " in your computer\u2019s browser, drag its button to your bookmarks bar, then click it on any article. It saves a small file; load it here with ", /*#__PURE__*/React.createElement("b", null, "Upload a subject file"), " (section 3). It lands in \u201CWeb clippings\u201D, and any ", /*#__PURE__*/React.createElement("i", null, "question :: answer"), " lines become cards."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Share from other apps"), " \u2014 on Android, use ", /*#__PURE__*/React.createElement("b", null, "Share \u2192 Brainly"), " in any app to drop text or a link into your \u201CReview\u201D subject."))), /*#__PURE__*/React.createElement("p", {
     className: "files-note"
   }, "Everything stays on this device unless you download it. Clearing this site's data, or uninstalling the app, deletes your notes \u2014 so keep a backup file in Drive."));
 }
