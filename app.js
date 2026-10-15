@@ -8,54 +8,54 @@ const {
 // ---------- Palette & constants ----------
 
 const SUBJECT_COLORS = [{
-  name: "Indigo",
-  hex: "#6C5CE7"
+  name: "Steel",
+  hex: "#3E7CAB"
 }, {
-  name: "Teal",
-  hex: "#00B39F"
+  name: "Aqua",
+  hex: "#3F9A8C"
 }, {
-  name: "Coral",
-  hex: "#FF6B6B"
+  name: "Clay",
+  hex: "#D98F78"
 }, {
-  name: "Sunshine",
-  hex: "#F5A623"
+  name: "Mustard",
+  hex: "#B48D2B"
 }, {
-  name: "Mint",
-  hex: "#2ECC71"
+  name: "Sage",
+  hex: "#8B9A63"
 }, {
-  name: "Sky",
-  hex: "#339CFF"
+  name: "Cornflower",
+  hex: "#7E9ED8"
 }, {
-  name: "Berry",
-  hex: "#C44FC0"
+  name: "Periwinkle",
+  hex: "#A5A8E3"
 }, {
   name: "Rose",
-  hex: "#FF4D8D"
+  hex: "#C0569A"
 }];
 const NOTE_COLORS = [{
   name: "Default",
   hex: null
 }, {
-  name: "Coral",
-  hex: "#FFE1DC"
+  name: "Clay",
+  hex: "#EFD0C4"
 }, {
-  name: "Sunshine",
-  hex: "#FFF3C4"
+  name: "Butter",
+  hex: "#F6EDC4"
 }, {
   name: "Mint",
-  hex: "#D3F5E3"
+  hex: "#D5E7E1"
 }, {
-  name: "Sky",
-  hex: "#D6EBFF"
+  name: "Cornflower",
+  hex: "#C6D4EF"
 }, {
-  name: "Lavender",
-  hex: "#E9DFFB"
+  name: "Periwinkle",
+  hex: "#CED0F7"
 }, {
-  name: "Peach",
-  hex: "#FFE6C7"
+  name: "Rose",
+  hex: "#F2D7E7"
 }, {
-  name: "Pink",
-  hex: "#FFDCEF"
+  name: "Sand",
+  hex: "#F3EAE3"
 }];
 const STORAGE_KEY = "brainly-data";
 const THEME_KEY = "brainly-theme";
@@ -1600,7 +1600,7 @@ function Brainly() {
         subject = {
           id: uid(),
           name: "PDF Imports",
-          color: "#6C5CE7",
+          color: "#3E7CAB",
           parentId: null,
           createdAt: nowISO()
         };
@@ -2636,13 +2636,17 @@ function Brainly() {
       setSelectedSubjectId(null);
       setSelectedTagIds([]);
     }
-  }, "\u2302 Home"), /*#__PURE__*/React.createElement("button", {
+  }, /*#__PURE__*/React.createElement(NavIcon, {
+    name: "home"
+  }), " Home"), /*#__PURE__*/React.createElement("button", {
     className: "home-nav-btn" + (showFilesPage ? " active" : ""),
     onClick: () => {
       setSelectedSubjectId(FILES_VIEW);
       setSelectedTagIds([]);
     }
-  }, "\uD83D\uDCC1 Files"), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement(NavIcon, {
+    name: "files"
+  }), " Files"), /*#__PURE__*/React.createElement("div", {
     className: "subject-list"
   }, topSubjects.length === 0 && /*#__PURE__*/React.createElement("div", {
     className: "empty-hint"
@@ -2747,19 +2751,27 @@ function Brainly() {
     className: "icon-toggle-btn",
     onClick: toggleTheme,
     title: theme === "dark" ? "Switch to light" : "Switch to dark"
-  }, theme === "dark" ? "☀ Light" : "☾ Dark"), /*#__PURE__*/React.createElement("button", {
+  }, /*#__PURE__*/React.createElement(NavIcon, {
+    name: theme === "dark" ? "sun" : "moon"
+  }), " ", theme === "dark" ? "Light mode" : "Dark mode"), /*#__PURE__*/React.createElement("button", {
     className: "icon-toggle-btn" + (remindersOn ? " on" : ""),
     onClick: toggleReminders,
     title: "Notify me about overdue cards while Brainly is open"
-  }, remindersOn ? "🔔 Reminders on" : "🔕 Reminders off"), pinLockAvailable() && /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement(NavIcon, {
+    name: remindersOn ? "bell" : "bell-off"
+  }), " ", remindersOn ? "Reminders on" : "Reminders off"), pinLockAvailable() && /*#__PURE__*/React.createElement("div", {
     className: "pin-lock-section"
   }, !(data.security && data.security.enabled) ? /*#__PURE__*/React.createElement("button", {
     className: "icon-toggle-btn",
     onClick: () => setShowPinModal("set")
-  }, "\uD83D\uDD12 Set a passcode") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
+  }, /*#__PURE__*/React.createElement(NavIcon, {
+    name: "lock"
+  }), " Set a passcode") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
     className: "icon-toggle-btn on",
     disabled: true
-  }, "\uD83D\uDD12 Passcode enabled"), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement(NavIcon, {
+    name: "lock"
+  }), " Passcode enabled"), /*#__PURE__*/React.createElement("div", {
     className: "pin-lock-actions"
   }, /*#__PURE__*/React.createElement("button", {
     className: "btn-ghost small",
@@ -3202,7 +3214,7 @@ function Dashboard({
 }) {
   const [homeSearch, setHomeSearch] = useState("");
   const subjectName = id => subjects.find(s => s.id === id)?.name || "—";
-  const subjectColor = id => subjects.find(s => s.id === id)?.color || "#6C5CE7";
+  const subjectColor = id => subjects.find(s => s.id === id)?.color || "#3E7CAB";
   const subjectPath = id => {
     const s = subjects.find(s => s.id === id);
     if (!s) return "—";
@@ -3231,7 +3243,7 @@ function Dashboard({
   }, /*#__PURE__*/React.createElement("div", {
     className: "eyebrow",
     style: {
-      color: "#6C5CE7"
+      color: "#3E7CAB"
     }
   }, "Home"), /*#__PURE__*/React.createElement("h1", null, "Your chart at a glance"), /*#__PURE__*/React.createElement("input", {
     className: "home-search-input",
@@ -3363,7 +3375,7 @@ function FilesPage({
   }, /*#__PURE__*/React.createElement("div", {
     className: "eyebrow",
     style: {
-      color: "#6C5CE7"
+      color: "#3E7CAB"
     }
   }, "Files"), /*#__PURE__*/React.createElement("h1", null, "Download & upload"), /*#__PURE__*/React.createElement("p", {
     className: "files-lede"
@@ -4515,7 +4527,7 @@ function DrawingCanvas({
   const [tool, setTool] = useState("pen"); // "pen" | "eraser" | "rect" | "ellipse" | "line" | "arrow" | "lasso"
   const [hasInk, setHasInk] = useState(!!backgroundImageUrl);
   const [bgLoaded, setBgLoaded] = useState(!backgroundImageUrl);
-  const DRAW_COLORS = ["#241C3D", "#6C5CE7", "#FF4D8D", "#00B39F", "#F5A623"];
+  const DRAW_COLORS = ["#241C3D", "#3E7CAB", "#FF4D8D", "#00B39F", "#F5A623"];
   const SHAPE_TOOLS = ["rect", "ellipse", "line", "arrow"];
 
   // Lasso select+resize state — see the note above LassoOverlay for the
@@ -5647,7 +5659,7 @@ function NoteEditor({
   const [annotatingThumb, setAnnotatingThumb] = useState(null); // { id, dataUrl } | null
 
   const subjectNameFor = sid => (subjects || []).find(s => s.id === sid)?.name || "";
-  const subjectColorFor = sid => (subjects || []).find(s => s.id === sid)?.color || "#6C5CE7";
+  const subjectColorFor = sid => (subjects || []).find(s => s.id === sid)?.color || "#3E7CAB";
   const noteSearchResults = useMemo(() => {
     const q = noteSearch.trim().toLowerCase();
     if (!q) return [];
@@ -6813,52 +6825,120 @@ function MatchGame({
   }))));
 }
 
+// ---------- Icons ----------
+
+const NAV_ICON_PATHS = {
+  home: /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("path", {
+    d: "M3 11l9-8 9 8"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M5 10v10h14V10"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M10 20v-6h4v6"
+  })),
+  files: /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("path", {
+    d: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"
+  })),
+  sun: /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("circle", {
+    cx: "12",
+    cy: "12",
+    r: "4"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
+  })),
+  moon: /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("path", {
+    d: "M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"
+  })),
+  bell: /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("path", {
+    d: "M6 8a6 6 0 0 1 12 0c0 7 3 8 3 8H3s3-1 3-8"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M10 20a2 2 0 0 0 4 0"
+  })),
+  "bell-off": /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("path", {
+    d: "M6 8a6 6 0 0 1 9-5.2M18 8c0 3 .6 5 1.5 6.3"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M3 16h12"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M10 20a2 2 0 0 0 4 0"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M3 3l18 18"
+  })),
+  lock: /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("rect", {
+    x: "4",
+    y: "11",
+    width: "16",
+    height: "10",
+    rx: "3"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M8 11V8a4 4 0 0 1 8 0v3"
+  }))
+};
+function NavIcon({
+  name
+}) {
+  return /*#__PURE__*/React.createElement("svg", {
+    className: "nav-ico",
+    viewBox: "0 0 24 24",
+    "aria-hidden": "true"
+  }, NAV_ICON_PATHS[name]);
+}
+
 // ---------- Styles ----------
 
 function Styles() {
   return /*#__PURE__*/React.createElement("style", null, `
-      @import url('https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;700&family=Inter:wght@400;500;600;700&display=swap');
+      @import url('https://fonts.googleapis.com/css2?family=Urbanist:wght@300;400;500;600;700;800&display=swap');
 
       .brainly-root {
-        --bg: #FAFAFF;
+        --bg: #EEF4F8;
         --surface: #FFFFFF;
-        --ink: #241C3D;
-        --muted: #8B87A6;
-        --border: #EAE6F7;
-        --primary: #6C5CE7;
-        --primary-dark: #5646C9;
-        --teal: #00B39F;
-        --red: #FF5C6C;
-        --amber: #F5A623;
-        --soft: #F3F1FE;
-        --soft-strong: #E4DFFC;
-        --soft-red: #FFEDEE;
-        --soft-red-strong: #FFE0E2;
-        --scroll-thumb: #C9C2F0;
+        --ink: #17171B;
+        --muted: #6C6C75;
+        --border: #E5E4EA;
+        --primary: #3E7CAB;
+        --primary-dark: #2F6A96;
+        --teal: #3F9A8C;
+        --red: #CF6A55;
+        --amber: #D9A23B;
+        --soft: #EEF4F8;
+        --soft-strong: #DCE9F2;
+        --soft-red: #F8E6E1;
+        --soft-red-strong: #F2D3CB;
+        --scroll-thumb: #C8C8CF;
+        --shadow: 0 8px 24px rgba(23,23,27,0.07);
         display: flex;
         min-height: 100vh;
-        background: var(--bg);
+        background: linear-gradient(180deg, #EAF2F7 0%, #FFFFFF 70%);
+        background-attachment: fixed;
         color: var(--ink);
-        font-family: 'Inter', -apple-system, sans-serif;
+        font-family: 'Urbanist', 'Inter', -apple-system, sans-serif;
         font-size: 15px;
       }
       .brainly-root.dark {
-        --bg: #17142B;
-        --surface: #201C3A;
-        --ink: #EDEBFA;
-        --muted: #A8A2CC;
-        --border: #33305A;
-        --primary: #8B7CF0;
-        --primary-dark: #A79AF5;
-        --teal: #2FE0C8;
-        --red: #FF8A94;
-        --amber: #FFC24D;
-        --soft: #2A2650;
-        --soft-strong: #383267;
-        --soft-red: #3A2530;
-        --soft-red-strong: #4A2A33;
-        --scroll-thumb: #453F78;
+        --bg: #17171B;
+        --surface: #232327;
+        --ink: #F8F7FA;
+        --muted: #9797A0;
+        --border: #3B3B42;
+        --primary: #8FB5D1;
+        --primary-dark: #C6D4EF;
+        --teal: #8CCDC2;
+        --red: #E8917F;
+        --amber: #EFC66E;
+        --soft: #2E2E35;
+        --soft-strong: #3B3B42;
+        --soft-red: #3D2A27;
+        --soft-red-strong: #4C322E;
+        --scroll-thumb: #4A4A52;
+        --shadow: 0 8px 24px rgba(0,0,0,0.35);
+        background: linear-gradient(180deg, #17171B 0%, #1C1C21 100%);
+        background-attachment: fixed;
       }
+      .brainly-root .sidebar, .brainly-root .main { background: transparent; }
+      .brainly-root.dark .sidebar { background: rgba(35,35,39,0.85); }
+      .brainly-root .sidebar { background: rgba(255,255,255,0.72); backdrop-filter: blur(10px); }
+      .brainly-root.dark .sidebar { backdrop-filter: blur(10px); }
+      .nav-ico { width: 18px; height: 18px; flex-shrink: 0; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+      .home-nav-btn, .icon-toggle-btn { display: flex; align-items: center; gap: 10px; }
       .brainly-root * { box-sizing: border-box; }
       .brainly-root button { font-family: 'Inter', sans-serif; cursor: pointer; }
       .brainly-root button:focus-visible,
@@ -7442,10 +7522,10 @@ function Styles() {
       .draw-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
       .draw-tool-row { display: flex; align-items: center; gap: 4px; }
       .lasso-preview-svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-      .lasso-preview-svg polyline { fill: none; stroke: #6C5CE7; stroke-width: 2; stroke-dasharray: 5 4; }
+      .lasso-preview-svg polyline { fill: none; stroke: #3E7CAB; stroke-width: 2; stroke-dasharray: 5 4; }
       .selection-overlay {
         position: absolute;
-        border: 2px dashed #6C5CE7;
+        border: 2px dashed #3E7CAB;
         cursor: move;
         touch-action: none;
       }
@@ -7457,7 +7537,7 @@ function Styles() {
         width: 18px;
         height: 18px;
         border-radius: 50%;
-        background: #6C5CE7;
+        background: #3E7CAB;
         border: 2px solid #fff;
         cursor: nwse-resize;
         touch-action: none;
@@ -7706,6 +7786,38 @@ function Styles() {
         white-space: pre-wrap;
         line-height: 1.5;
       }
+
+      /* ---- Soft pastel redesign (StudyFlow / Nixtio inspired) ---- */
+      .brainly-root h1, .brainly-root h2, .brand-name, .lock-screen-card h2 { font-family: 'Urbanist', sans-serif; font-weight: 600; letter-spacing: -0.02em; }
+      .brainly-root h1 { font-weight: 300; }
+      .brainly-root button { font-family: 'Urbanist', sans-serif; }
+      .brand-mark { display: inline-flex; width: 34px; height: 34px; align-items: center; justify-content: center; border-radius: 12px; background: var(--primary); color: #fff; font-size: 17px; }
+      .brand-name { font-size: 22px; }
+      .brand { gap: 10px; }
+      .home-nav-btn, .subject-item { border-radius: 14px; padding: 10px 12px; }
+      .home-nav-btn.active, .subject-item.active { background: var(--primary); color: #fff; box-shadow: 0 4px 12px rgba(62,124,171,0.28); }
+      .subject-item .dot { width: 10px; height: 10px; }
+      .add-subject-btn { border-radius: 14px; }
+      .btn-primary { border-radius: 999px; min-height: 44px; padding: 10px 22px; box-shadow: 0 4px 12px rgba(62,124,171,0.25); }
+      .btn-ghost { border-radius: 999px; background: var(--surface); }
+      .icon-toggle-btn { border-radius: 14px; background: var(--surface); }
+      .main { padding: 32px 40px; }
+      .main-header h1 { font-size: 32px; }
+      .quick-add-wrap, .note-card, .files-card, .modal { border-radius: 28px; border-color: transparent; box-shadow: var(--shadow); }
+      .note-card { padding: 18px 20px; }
+      .note-card:hover { box-shadow: 0 10px 26px rgba(62,124,171,0.18); }
+      .modal { border-radius: 36px; }
+      .search, .url-input, .new-subject-form input, .parent-select, .pin-input { border-radius: 999px; padding-left: 16px; }
+      .search { box-shadow: var(--shadow); border-color: transparent; max-width: 420px; }
+      .tag-chip, .tag-pill { border-radius: 999px; }
+      .tag-chip.active, .tab-btn.active { background-color: var(--primary); }
+      .tab-bar { gap: 6px; border-bottom: none; background: var(--surface); padding: 6px; border-radius: 999px; width: fit-content; box-shadow: var(--shadow); max-width: 100%; overflow-x: auto; }
+      .tab-btn { margin-right: 0; padding: 9px 16px; border-radius: 999px; border-bottom: none; }
+      .tab-btn.active { color: #fff; border-bottom: none; }
+      .tab-btn.active .tab-badge { background: #fff; color: var(--primary); }
+      .overdue-banner { border-radius: 20px; border-color: transparent; background: var(--soft-red); box-shadow: var(--shadow); }
+      .files-tip { border-radius: 16px; }
+      .brainly-root.dark .note-card, .brainly-root.dark .quick-add-wrap { border: 1px solid var(--border); }
 
       @media (max-width: 720px) {
         .brainly-root { flex-direction: column; }
