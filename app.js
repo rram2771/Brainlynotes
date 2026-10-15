@@ -4068,6 +4068,32 @@ function RichTextEditor({
       document.removeEventListener("click", handleOutsideClick, true);
     };
   }, []);
+
+  // Takes highlights off but keeps the text: unwraps every <mark> the selection touches,
+  // or the one the cursor is sitting in when nothing is selected.
+  const handleRemoveHighlight = () => {
+    const root = editorRef.current;
+    const sel = window.getSelection();
+    if (!root || !sel || sel.rangeCount === 0) return;
+    const range = sel.getRangeAt(0);
+    if (!root.contains(range.commonAncestorContainer)) return;
+    let marks = Array.from(root.querySelectorAll("mark")).filter(m => range.intersectsNode(m));
+    if (marks.length === 0) {
+      const n = range.startContainer;
+      const host = n.nodeType === 1 ? n : n.parentElement;
+      const m = host && host.closest ? host.closest("mark") : null;
+      if (m && root.contains(m)) marks = [m];
+    }
+    if (marks.length === 0) return;
+    marks.forEach(m => {
+      const parent = m.parentNode;
+      if (!parent) return;
+      while (m.firstChild) parent.insertBefore(m.firstChild, m);
+      parent.removeChild(m);
+      parent.normalize();
+    });
+    onChange(root.innerHTML);
+  };
   const handleHighlight = variant => {
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed || !editorRef.current) return;
@@ -4322,7 +4348,14 @@ function RichTextEditor({
     title: "Highlight \u2014 supporting",
     onMouseDown: e => e.preventDefault(),
     onClick: () => handleHighlight("green")
-  })))), /*#__PURE__*/React.createElement("div", {
+  }), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "rte-highlight-clear",
+    title: "Remove highlight, keep the text \u2014 select it, or tap inside it",
+    "aria-label": "Remove highlight",
+    onMouseDown: e => e.preventDefault(),
+    onClick: handleRemoveHighlight
+  }, "\u2715")))), /*#__PURE__*/React.createElement("div", {
     ref: editorRef,
     className: "rte-body" + (tall ? " rte-body-tall" : ""),
     contentEditable: true,
@@ -4398,7 +4431,14 @@ function RichTextEditor({
     title: "Highlight \u2014 supporting",
     onMouseDown: e => e.preventDefault(),
     onClick: () => handleHighlight("green")
-  })), /*#__PURE__*/React.createElement("span", {
+  }), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "rte-highlight-clear",
+    title: "Remove highlight, keep the text",
+    "aria-label": "Remove highlight",
+    onMouseDown: e => e.preventDefault(),
+    onClick: handleRemoveHighlight
+  }, "\u2715")), /*#__PURE__*/React.createElement("span", {
     className: "rte-toolbar-divider"
   }), /*#__PURE__*/React.createElement("button", {
     type: "button",
@@ -7423,6 +7463,9 @@ function Styles() {
       .rte-highlight-group { display: flex; align-items: center; gap: 5px; padding: 0 4px; }
       .rte-highlight-swatch { width: 18px; height: 18px; border-radius: 5px; border: 1px solid rgba(36,28,61,0.15); padding: 0; }
       .rte-highlight-swatch:hover { transform: scale(1.12); }
+      .rte-highlight-clear { width: 22px; height: 22px; border-radius: 50%; border: 1.5px solid var(--border); background: transparent; color: var(--muted); font-size: 11px; line-height: 1; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+      .rte-highlight-clear:hover { color: var(--red); border-color: var(--red); }
+      .rte-floating-toolbar .rte-highlight-clear { color: #fff; border-color: rgba(255,255,255,0.5); }
       .rte-highlight-swatch.yellow { background: #FFF3C4; }
       .rte-highlight-swatch.red { background: #FFCDD2; }
       .rte-highlight-swatch.green { background: #C8F4DE; }
