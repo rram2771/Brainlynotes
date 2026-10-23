@@ -261,6 +261,75 @@ function stripHighlights(html) {
   return out;
 }
 
+// A clip sent straight from another website is untrusted: rebuild it from plain strings and keep
+// only simple text tags (plus http(s) links and pictures), so a page can't slip script into a note.
+function sanitizeClipPayload(p) {
+  const str = (v, max) => String(v == null ? "" : v).slice(0, max);
+  const safeHTML = html => {
+    const doc = new DOMParser().parseFromString("<div>" + str(html, 600000) + "</div>", "text/html");
+    const OK = new Set(["H1", "H2", "H3", "H4", "P", "UL", "OL", "LI", "B", "STRONG", "I", "EM", "U", "BR", "A", "IMG"]);
+    const walk = node => {
+      let out = "";
+      node.childNodes.forEach(c => {
+        if (c.nodeType === 3) {
+          out += escapeHTML(c.nodeValue);
+          return;
+        }
+        if (c.nodeType !== 1) return;
+        const tag = c.tagName;
+        if (tag === "SCRIPT" || tag === "STYLE" || tag === "IFRAME" || tag === "OBJECT" || tag === "EMBED") return;
+        if (tag === "IMG") {
+          const src = c.getAttribute("src") || "";
+          if (/^https?:\/\//i.test(src) || /^data:image\/(png|jpe?g|gif|webp);base64,/i.test(src)) out += '<img src="' + escapeAttr(src) + '">';
+          return;
+        }
+        const inner = walk(c);
+        if (!OK.has(tag)) {
+          out += inner;
+          return;
+        }
+        const t = tag.toLowerCase();
+        if (t === "br") out += "<br>";else if (t === "a") {
+          const href = c.getAttribute("href") || "";
+          out += /^https?:\/\//i.test(href) ? '<a href="' + escapeAttr(href) + '" target="_blank" rel="noopener">' + inner + "</a>" : inner;
+        } else out += "<" + t + ">" + inner + "</" + t + ">";
+      });
+      return out;
+    };
+    return walk(doc.body.firstChild);
+  };
+  const now = new Date().toISOString();
+  const subjects = (Array.isArray(p.subjects) ? p.subjects : []).slice(0, 5).map(s => ({
+    id: str(s.id, 60) || "web-clippings",
+    name: str(s.name, 80) || "Web clippings",
+    color: /^#[0-9a-f]{6}$/i.test(s.color || "") ? s.color : "#3E7CAB",
+    parentId: null,
+    createdAt: now
+  }));
+  const tags = (Array.isArray(p.tags) ? p.tags : []).slice(0, 20).map(t => ({
+    id: str(t.id, 60),
+    name: str(t.name, 40)
+  })).filter(t => t.id && t.name);
+  const notes = (Array.isArray(p.notes) ? p.notes : []).slice(0, 20).map(n => ({
+    id: str(n.id, 60) || "clip-" + Date.now().toString(36),
+    subjectId: str(n.subjectId, 60),
+    title: str(n.title, 200) || "Untitled clip",
+    bodyHTML: safeHTML(n.bodyHTML),
+    tagIds: (Array.isArray(n.tagIds) ? n.tagIds : []).slice(0, 20).map(x => str(x, 60)),
+    images: [],
+    color: null,
+    linkedNoteIds: [],
+    createdAt: now,
+    updatedAt: now
+  }));
+  return {
+    subjects,
+    tags,
+    notes,
+    cards: []
+  };
+}
+
 // Whether a note has anything worth saving. Checking typed text alone (as every save path
 // used to) treats a note that's only a title plus pasted/inserted images — e.g. an EKG strip
 // titled "PVC" — as empty, so it was silently discarded on Add with no message at all.
@@ -1189,8 +1258,15 @@ function Brainly() {
   const [subjectImportBusy, setSubjectImportBusy] = useState(false);
   const [unlocked, setUnlocked] = useState(false);
   const [showPinModal, setShowPinModal] = useState(null); // "set" | "change" | "remove" | null
-  const [splitPane, setSplitPane] = useState(null); // null | { type: "note", note } | { type: "cards", noteId, subjectId, scope: "note"|"subject" }
-
+  const [splitPane, setSplitPane] = useState(null); // null | { type: "note", note } | { type: "cards", noteId, subjectId, scope } | { type: "images", noteId, subjectId, scope }
+  const [showTopicAi, setShowTopicAi] = useState(false);
+  const [appAi, setAppAi] = useState({
+    apiKey: "",
+    model: AI_MODELS[0].id
+  });
+  useEffect(() => {
+    if (showTopicAi) loadAiSettings().then(setAppAi);
+  }, [showTopicAi]);
   const [theme, setTheme] = useState("light"); // "light" | "dark"
   const [remindersOn, setRemindersOn] = useState(false);
   const askConfirm = (message, onConfirm, confirmLabel) => setConfirmDialog({
@@ -2308,6 +2384,14 @@ function Brainly() {
       note: target
     });
   };
+  const openSplitImages = (noteId, subjectId) => {
+    setSplitPane({
+      type: "images",
+      noteId,
+      subjectId,
+      scope: "note"
+    });
+  };
   const openSplitCards = (noteId, subjectId) => {
     setSplitPane({
       type: "cards",
@@ -2323,6 +2407,19 @@ function Brainly() {
     }
     return data.cards.filter(c => (c.sourceNoteIds || []).includes(splitPane.noteId));
   }, [splitPane, data.cards]);
+
+  // Pictures for the "Pictures" split pane: the open note's, or every picture in the subject.
+  const splitPaneImages = useMemo(() => {
+    if (!splitPane || splitPane.type !== "images") return [];
+    const notes = splitPane.scope === "subject" ? data.notes.filter(n => n.subjectId === splitPane.subjectId) : data.notes.filter(n => n.id === splitPane.noteId);
+    const items = [];
+    notes.forEach(n => (n.images || []).forEach(im => items.push({
+      id: im.id,
+      dataUrl: im.dataUrl,
+      noteTitle: n.title
+    })));
+    return items;
+  }, [splitPane, data.notes]);
   const createCardFromHighlight = async (noteId, front, back) => {
     if (!noteId || !selectedSubjectId) return;
     const now = nowISO();
@@ -2473,6 +2570,58 @@ function Brainly() {
     };
     await persist(merged);
   };
+
+  // Direct clipping: the clipper bookmark opens Brainly in a new tab and hands the clip over with
+  // postMessage. Nothing is added until the person confirms, and the clip is rebuilt from plain
+  // text first (see sanitizeClipPayload).
+  const [pendingClip, setPendingClip] = useState(null);
+  useEffect(() => {
+    const onMsg = ev => {
+      const m = ev.data;
+      if (!m || m.type !== "brainly-clip" || !ev.source || !isValidBrainlyExport(m.payload)) return;
+      setPendingClip({
+        payload: sanitizeClipPayload(m.payload),
+        source: ev.source,
+        origin: ev.origin
+      });
+    };
+    window.addEventListener("message", onMsg);
+    if (window.opener && /[?&]clip=1/.test(location.search)) {
+      try {
+        window.opener.postMessage({
+          type: "brainly-clip-ready"
+        }, "*");
+      } catch (e) {/* opener gone */}
+      try {
+        history.replaceState(null, "", location.pathname);
+      } catch (e) {/* not allowed here */}
+    }
+    return () => window.removeEventListener("message", onMsg);
+  }, []);
+  useEffect(() => {
+    if (!pendingClip || !ready) return;
+    if (pinLockAvailable() && data.security && data.security.enabled && !unlocked) return;
+    const {
+      payload,
+      source,
+      origin
+    } = pendingClip;
+    setPendingClip(null);
+    if (!payload.notes.length) return;
+    let host = origin;
+    try {
+      host = new URL(origin).hostname;
+    } catch (e) {/* keep the raw origin */}
+    askConfirm(`Add the clip "${payload.notes[0].title}" from ${host} to Brainly?`, async () => {
+      await mergeImportedData(payload);
+      showToast("Clip added to Web clippings");
+      try {
+        source.postMessage({
+          type: "brainly-clip-done"
+        }, origin);
+      } catch (e) {/* the other tab was closed */}
+    }, "Add clip");
+  }, [pendingClip, ready, unlocked, data.security]);
 
   // ---- Card handlers ----
 
@@ -2696,7 +2845,13 @@ function Brainly() {
     }
   }, /*#__PURE__*/React.createElement(NavIcon, {
     name: "files"
-  }), " Files"), /*#__PURE__*/React.createElement("div", {
+  }), " Files"), /*#__PURE__*/React.createElement("button", {
+    className: "home-nav-btn",
+    onClick: () => setShowTopicAi(true),
+    title: "Type a topic and get a full nursing study note"
+  }, /*#__PURE__*/React.createElement(NavIcon, {
+    name: "sparkle"
+  }), " AI notes"), /*#__PURE__*/React.createElement("div", {
     className: "subject-list"
   }, topSubjects.length === 0 && /*#__PURE__*/React.createElement("div", {
     className: "empty-hint"
@@ -3107,6 +3262,7 @@ function Brainly() {
     onNavigateToNote: navigateToNote,
     onSplitWithNote: openSplitNote,
     onSplitWithCards: openSplitCards,
+    onSplitWithImages: openSplitImages,
     isSplitPane: false,
     onImageError: () => showToast("Couldn't load that image — try saving it to your device first, then use + Add image.")
   }), splitPane && splitPane.type === "note" && /*#__PURE__*/React.createElement(NoteEditor, {
@@ -3145,6 +3301,17 @@ function Brainly() {
     onNavigateToNote: navigateToNote,
     isSplitPane: true,
     onImageError: () => showToast("Couldn't load that image — try saving it to your device first, then use + Add image.")
+  }), splitPane && splitPane.type === "images" && /*#__PURE__*/React.createElement(SplitImagesPanel, {
+    items: splitPaneImages,
+    scope: splitPane.scope,
+    onScopeChange: scope => setSplitPane(p => ({
+      ...p,
+      scope
+    })),
+    noteTitle: (data.notes.find(n => n.id === splitPane.noteId) || {}).title || "",
+    subjectTitle: (data.subjects.find(s => s.id === splitPane.subjectId) || {}).name || "",
+    onClose: () => setSplitPane(null),
+    onOpenImage: setLightboxImage
   }), splitPane && splitPane.type === "cards" && /*#__PURE__*/React.createElement(SplitCardsPanel, {
     cards: splitPaneCards,
     scope: splitPane.scope,
@@ -3166,7 +3333,29 @@ function Brainly() {
       });
       setShowReview(true);
     }
-  })), editingCard !== null && /*#__PURE__*/React.createElement(CardEditor, {
+  })), showTopicAi && /*#__PURE__*/React.createElement(AiTopicModal, {
+    settings: appAi,
+    onSettingsChange: setAppAi,
+    subjectOptions: flatSubjectOptions,
+    defaultSubjectId: selectedSubjectId && selectedSubjectId !== FILES_VIEW ? selectedSubjectId : null,
+    onCreate: async p => {
+      await saveNote({
+        subjectId: p.subjectId
+      }, {
+        title: p.title,
+        bodyHTML: p.bodyHTML,
+        tagNames: p.tagNames,
+        images: p.images,
+        color: null,
+        subjectId: p.subjectId,
+        linkedNoteIds: []
+      });
+      setSelectedSubjectId(p.subjectId);
+      setSelectedTagIds([]);
+      setTab("notes");
+    },
+    onClose: () => setShowTopicAi(false)
+  }), editingCard !== null && /*#__PURE__*/React.createElement(CardEditor, {
     card: editingCard,
     onCancel: () => setEditingCard(null),
     onSave: updateCard
@@ -5633,6 +5822,7 @@ function NoteEditor({
   onNavigateToNote,
   onSplitWithNote,
   onSplitWithCards,
+  onSplitWithImages,
   isSplitPane,
   onImageError
 }) {
@@ -5907,7 +6097,14 @@ function NoteEditor({
     }
   }, "\u25A4 This note's flashcards", /*#__PURE__*/React.createElement("span", {
     className: "split-menu-desc"
-  }, "See and study cards made from this note")), onSplitWithNote && note.id && /*#__PURE__*/React.createElement("button", {
+  }, "See and study cards made from this note")), onSplitWithImages && /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      onSplitWithImages(note.id, note.subjectId);
+      setSplitMenuOpen(false);
+    }
+  }, "\uD83D\uDDBC Pictures", /*#__PURE__*/React.createElement("span", {
+    className: "split-menu-desc"
+  }, "See this note's pictures (or the whole subject's) beside the text")), onSplitWithNote && note.id && /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       onSplitWithNote(note.id);
       setSplitMenuOpen(false);
@@ -8301,6 +8498,358 @@ function Whiteboard({
   }, "Two fingers or scroll wheel: zoom and move. \u270B or Shift-drag: move.")));
 }
 
+// ---------- AI topic -> full study note (for nursing topics) ----------
+
+// A vertical flow chart (for "how the disease process or drug works" steps), drawn as plain SVG.
+function flowSVG(steps, heading) {
+  const W = 440,
+    PAD = 24,
+    BOX_W = W - PAD * 2,
+    LINE_H = 18,
+    GAP = 26;
+  const wrap = text => {
+    const words = String(text || "").trim().split(/\s+/);
+    const lines = [];
+    let cur = "";
+    words.forEach(w => {
+      if ((cur + " " + w).trim().length > 40) {
+        lines.push(cur);
+        cur = w;
+      } else cur = (cur + " " + w).trim();
+    });
+    if (cur) lines.push(cur);
+    return lines.slice(0, 4);
+  };
+  const colors = ["#3E7CAB", "#3F9A8C", "#B48D2B", "#D98F78", "#7E9ED8", "#C0569A"];
+  let y = heading ? 54 : 20;
+  let body = "";
+  steps.slice(0, 9).forEach((s, i) => {
+    const lines = wrap(s);
+    const h = lines.length * LINE_H + 20;
+    const c = colors[i % colors.length];
+    body += `<rect x="${PAD}" y="${y}" width="${BOX_W}" height="${h}" rx="14" fill="${c}" fill-opacity="0.14" stroke="${c}" stroke-width="2"/>`;
+    lines.forEach((ln, j) => {
+      body += `<text x="${W / 2}" y="${y + 24 + j * LINE_H}" text-anchor="middle" font-size="14" font-weight="600" fill="#17171B">${escapeHTML(ln)}</text>`;
+    });
+    y += h;
+    if (i < Math.min(steps.length, 9) - 1) {
+      body += `<path d="M${W / 2},${y + 2} L${W / 2},${y + GAP - 6}" stroke="#6C6C75" stroke-width="2.2" fill="none"/><path d="M${W / 2 - 6},${y + GAP - 12} L${W / 2},${y + GAP - 4} L${W / 2 + 6},${y + GAP - 12}" stroke="#6C6C75" stroke-width="2.2" fill="none"/>`;
+      y += GAP;
+    }
+  });
+  const H = y + 20;
+  const title = heading ? `<text x="${W / 2}" y="32" text-anchor="middle" font-size="17" font-weight="700" fill="#17171B">${escapeHTML(heading)}</text>` : "";
+  return {
+    svg: `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="Urbanist, system-ui, sans-serif"><rect width="100%" height="100%" fill="#ffffff"/>${title}${body}</svg>`,
+    width: W,
+    height: H
+  };
+}
+const TOPIC_KINDS = [{
+  id: "auto",
+  label: "Work it out for me"
+}, {
+  id: "disease",
+  label: "Disease or condition"
+}, {
+  id: "medication",
+  label: "Medication"
+}, {
+  id: "procedure",
+  label: "Procedure or test"
+}, {
+  id: "lab",
+  label: "Lab value or ECG finding"
+}, {
+  id: "other",
+  label: "Something else"
+}];
+const TOPIC_SYSTEM = AI_SYSTEM + " The user is a nurse who wants a compact study note on a topic. Return ONLY JSON with this shape: " + '{"title": string (topic name plus its type, e.g. "Cardiomyopathy (Disease)"), ' + '"kind": "disease"|"medication"|"procedure"|"lab"|"other", ' + '"what": string (2-3 short plain-language sentences: what it is), ' + '"sections": [{"heading": string, "bullets": [string]}], ' + '"flow": [string] (4-8 short steps for the disease process or the drug\'s mechanism of action, in order), ' + '"mindmap": {"center": string, "branches": [{"label": string, "children": [{"label": string, "children": []}]}]}, ' + '"flashcards": [{"q": string, "a": string}], ' + '"summary": string (2-3 lines), ' + '"keywords": [string] (4-8 short tag words)}. ' + "Rules: use short, easy-to-scan wording; bullets under 14 words, 3-7 per section. " + "Sections for a disease: Types or causes; How it develops (disease process); Signs and symptoms; Diagnosis and key tests; Treatment; What the RN needs to know (assessment, monitoring, interventions, patient teaching, red flags and when to call the provider); What the provider needs to know. " + "Sections for a medication: Drug class; Mechanism of action; Uses; Side effects and adverse effects; Contraindications and cautions; Nursing considerations (monitoring, administration, labs to watch); Patient teaching; Red flags and when to call the provider. " + "Sections for a procedure, test, lab or other topic: adapt sensibly (purpose, how it works or is done, normal and abnormal findings, preparation, RN responsibilities, complications, patient teaching). " + "Never invent doses, numbers or facts; give typical reference ranges only when you are confident and otherwise say to check current references or the facility protocol. " + "Flashcards must be one fact each with short answers.";
+function AiTopicModal({
+  settings,
+  onSettingsChange,
+  subjectOptions,
+  defaultSubjectId,
+  onCreate,
+  onClose
+}) {
+  const [topic, setTopic] = useState("");
+  const [kind, setKind] = useState("auto");
+  const [depth, setDepth] = useState("standard");
+  const [withDiagrams, setWithDiagrams] = useState(true);
+  const [withCards, setWithCards] = useState(true);
+  const [subjectId, setSubjectId] = useState(defaultSubjectId || subjectOptions[0] && subjectOptions[0].id || "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [draft, setDraft] = useState(null);
+  const hasKey = !!settings.apiKey;
+  const generate = async () => {
+    const t = topic.trim();
+    if (!t) {
+      setError("Type a topic first, for example “cardiomyopathy” or “metoprolol”.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setDraft(null);
+    try {
+      const detail = depth === "quick" ? "Keep it brief: 3 sections, 3-4 bullets each, 5 flashcards." : depth === "detailed" ? "Be thorough: every relevant section, up to 7 bullets each, 12-16 flashcards." : "Standard length: about 5 sections, 4-6 bullets each, 8-10 flashcards.";
+      const out = await callClaude(settings, {
+        system: TOPIC_SYSTEM + " " + detail + (withCards ? "" : " Return an empty flashcards array.") + (withDiagrams ? "" : " Return an empty flow array and a mindmap with no branches."),
+        content: "Topic: " + t + (kind !== "auto" ? "\nType: " + TOPIC_KINDS.find(k => k.id === kind).label : ""),
+        maxTokens: depth === "detailed" ? 7000 : 5000
+      });
+      const j = aiParseJSON(out);
+      const esc = escapeHTML;
+      let html = "<h2>" + esc(j.title || t) + "</h2>";
+      html += "<p><i>AI-generated study note. Check it against your facility policy and current references before relying on it.</i></p>";
+      if (j.what) html += "<h3>What it is</h3><p>" + esc(j.what) + "</p>";
+      (j.sections || []).forEach(s => {
+        if (!s || !s.heading || !(s.bullets || []).length) return;
+        html += "<h3>" + esc(s.heading) + "</h3><ul>" + s.bullets.map(b => "<li>" + esc(b) + "</li>").join("") + "</ul>";
+      });
+      const cards = withCards ? (j.flashcards || []).filter(c => c && c.q && c.a) : [];
+      if (cards.length) html += "<h3>Flashcards</h3>" + cards.map(c => "<p>" + esc(String(c.q).replace(/\s+/g, " ")) + " :: " + esc(String(c.a).replace(/\s+/g, " ")) + "</p>").join("");
+      if (j.summary) html += "<h3>Summary</h3><p>" + esc(j.summary) + "</p>";
+      const keywords = (j.keywords || []).map(k => String(k).trim().toLowerCase()).filter(Boolean).slice(0, 8);
+      if (keywords.length) html += "<p><b>Keywords:</b> " + esc(keywords.join(", ")) + "</p>";
+      const images = [];
+      if (withDiagrams) {
+        if (j.flow && j.flow.length > 1) {
+          const f = flowSVG(j.flow, kind === "medication" || j.kind === "medication" ? "How it works" : "How it develops");
+          images.push({
+            id: uid(),
+            dataUrl: await svgToPngDataUrl(f.svg, f.width, f.height)
+          });
+        }
+        if (j.mindmap && (j.mindmap.branches || []).length) {
+          const m = mindMapSVG(j.mindmap);
+          images.push({
+            id: uid(),
+            dataUrl: await svgToPngDataUrl(m.svg, m.width, m.height)
+          });
+        }
+      }
+      const tagNames = [...new Set([...keywords, (j.kind || "").toLowerCase(), "ai notes"].filter(Boolean))];
+      setDraft({
+        title: j.title || t,
+        html,
+        images,
+        tagNames,
+        cardCount: cards.length
+      });
+    } catch (e) {
+      setError(e.message || "Something went wrong.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const save = async () => {
+    if (!subjectId) {
+      setError("Make a subject first (＋ New subject), then pick it here.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await onCreate({
+        title: draft.title,
+        bodyHTML: draft.html,
+        images: draft.images,
+        tagNames: draft.tagNames,
+        subjectId
+      });
+      onClose();
+    } catch (e) {
+      setError(e.message || "Couldn't save the note.");
+      setBusy(false);
+    }
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    className: "modal-backdrop",
+    onClick: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal wide ai-modal",
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal-header"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "eyebrow"
+  }, "\u2726 Topic \u2192 study note"), /*#__PURE__*/React.createElement("button", {
+    className: "modal-close",
+    onClick: onClose
+  }, "\u2715")), !hasKey ? /*#__PURE__*/React.createElement("div", {
+    className: "ai-body"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "modal-copy"
+  }, "Paste your Claude API key to turn this on. It stays on this device."), /*#__PURE__*/React.createElement(AiKeyForm, {
+    settings: settings,
+    onSaved: onSettingsChange
+  })) : !draft ? /*#__PURE__*/React.createElement("div", {
+    className: "ai-body"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "modal-copy"
+  }, "Type a disease, medication, procedure or test. Brainly writes a short nurse-friendly note with a plain explanation, the process or mechanism, what the RN and provider need to know, diagrams, flashcards, a summary and tags."), /*#__PURE__*/React.createElement("input", {
+    className: "url-input",
+    placeholder: "e.g. cardiomyopathy, metoprolol, dobutamine stress echo\u2026",
+    value: topic,
+    onChange: e => setTopic(e.target.value),
+    onKeyDown: e => e.key === "Enter" && !busy && generate(),
+    autoFocus: true
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "ai-topic-row"
+  }, /*#__PURE__*/React.createElement("select", {
+    className: "parent-select",
+    value: kind,
+    onChange: e => setKind(e.target.value)
+  }, TOPIC_KINDS.map(k => /*#__PURE__*/React.createElement("option", {
+    key: k.id,
+    value: k.id
+  }, k.label))), /*#__PURE__*/React.createElement("select", {
+    className: "parent-select",
+    value: depth,
+    onChange: e => setDepth(e.target.value)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "quick"
+  }, "Quick (short)"), /*#__PURE__*/React.createElement("option", {
+    value: "standard"
+  }, "Standard"), /*#__PURE__*/React.createElement("option", {
+    value: "detailed"
+  }, "Detailed (longer)"))), /*#__PURE__*/React.createElement("label", {
+    className: "ai-backup-opt"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: withDiagrams,
+    onChange: e => setWithDiagrams(e.target.checked)
+  }), /*#__PURE__*/React.createElement("span", null, "Include diagrams (process flow and mind map)")), /*#__PURE__*/React.createElement("label", {
+    className: "ai-backup-opt"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: withCards,
+    onChange: e => setWithCards(e.target.checked)
+  }), /*#__PURE__*/React.createElement("span", null, "Include flashcards (question :: answer)")), /*#__PURE__*/React.createElement("label", {
+    className: "field-label"
+  }, "Save into subject"), /*#__PURE__*/React.createElement("select", {
+    className: "parent-select",
+    value: subjectId,
+    onChange: e => setSubjectId(e.target.value)
+  }, subjectOptions.length === 0 && /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "(no subjects yet)"), subjectOptions.map(s => /*#__PURE__*/React.createElement("option", {
+    key: s.id,
+    value: s.id
+  }, s.label))), /*#__PURE__*/React.createElement("div", {
+    className: "modal-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost",
+    onClick: onClose
+  }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    disabled: busy || !topic.trim(),
+    onClick: generate
+  }, busy ? "Writing the note…" : "Create notes")), error && /*#__PURE__*/React.createElement("p", {
+    className: "gen-error"
+  }, error)) : /*#__PURE__*/React.createElement("div", {
+    className: "ai-body"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "modal-copy"
+  }, "Preview. Nothing is saved until you press Save. You can edit the note afterwards. ", draft.cardCount ? draft.cardCount + " flashcards will be created when it saves." : ""), /*#__PURE__*/React.createElement("div", {
+    className: "ai-preview rte-body",
+    style: {
+      maxHeight: "50vh"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    dangerouslySetInnerHTML: {
+      __html: draft.html
+    }
+  }), draft.images.map(im => /*#__PURE__*/React.createElement("img", {
+    key: im.id,
+    src: im.dataUrl,
+    alt: "",
+    style: {
+      maxWidth: "100%",
+      borderRadius: 12,
+      margin: "8px 0",
+      display: "block"
+    }
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "ai-topic-tags"
+  }, draft.tagNames.map(t => /*#__PURE__*/React.createElement("span", {
+    key: t,
+    className: "tag-pill"
+  }, "#", t))), /*#__PURE__*/React.createElement("div", {
+    className: "modal-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost",
+    onClick: () => setDraft(null)
+  }, "Change topic"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost",
+    disabled: busy,
+    onClick: generate
+  }, busy ? "Writing…" : "Redo"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    disabled: busy,
+    onClick: save
+  }, "Save note")), error && /*#__PURE__*/React.createElement("p", {
+    className: "gen-error"
+  }, error))));
+}
+
+// ---------- Split view: pictures beside the note ----------
+
+function SplitImagesPanel({
+  items,
+  scope,
+  onScopeChange,
+  noteTitle,
+  subjectTitle,
+  onClose,
+  onOpenImage
+}) {
+  const [width, setWidth] = useState(100);
+  return /*#__PURE__*/React.createElement("div", {
+    className: "note-editor-pane split cards-pane"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal-header"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "eyebrow"
+  }, "Pictures"), /*#__PURE__*/React.createElement("button", {
+    className: "modal-close",
+    onClick: onClose
+  }, "\u2715 Close pane")), /*#__PURE__*/React.createElement("div", {
+    className: "note-editor-scroll-region"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "scope-toggle"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "scope-btn" + (scope === "note" ? " active" : ""),
+    onClick: () => onScopeChange("note")
+  }, "This note", noteTitle ? `: ${noteTitle}` : ""), /*#__PURE__*/React.createElement("button", {
+    className: "scope-btn" + (scope === "subject" ? " active" : ""),
+    onClick: () => onScopeChange("subject")
+  }, "Whole subject", subjectTitle ? `: ${subjectTitle}` : "")), /*#__PURE__*/React.createElement("label", {
+    className: "img-pane-zoom"
+  }, /*#__PURE__*/React.createElement("span", null, "Size"), /*#__PURE__*/React.createElement("input", {
+    type: "range",
+    min: "40",
+    max: "300",
+    value: width,
+    onChange: e => setWidth(Number(e.target.value))
+  }), /*#__PURE__*/React.createElement("span", null, width, "%")), items.length === 0 ? /*#__PURE__*/React.createElement("p", {
+    className: "empty-hint"
+  }, "No pictures here yet. Add one with + Add image or \u270E Draw. New pictures show up after the note autosaves.") : /*#__PURE__*/React.createElement("div", {
+    className: "img-pane-list"
+  }, items.map(it => /*#__PURE__*/React.createElement("figure", {
+    key: it.id,
+    className: "img-pane-item"
+  }, /*#__PURE__*/React.createElement("img", {
+    src: it.dataUrl,
+    alt: "",
+    style: {
+      width: width + "%"
+    },
+    onClick: () => onOpenImage && onOpenImage(it.dataUrl)
+  }), scope === "subject" && it.noteTitle && /*#__PURE__*/React.createElement("figcaption", null, it.noteTitle))))));
+}
+
 // ---------- Icons ----------
 
 const NAV_ICON_PATHS = {
@@ -8346,6 +8895,11 @@ const NAV_ICON_PATHS = {
     rx: "3"
   }), /*#__PURE__*/React.createElement("path", {
     d: "M8 11V8a4 4 0 0 1 8 0v3"
+  })),
+  sparkle: /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("path", {
+    d: "M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M19 16l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z"
   }))
 };
 function NavIcon({
@@ -9332,6 +9886,16 @@ function Styles() {
       .wb-zoom-pct { min-width: 64px; font-size: 13px; }
       .wb-hint { position: absolute; left: 12px; bottom: max(12px, env(safe-area-inset-bottom)); font-size: 12px; color: var(--muted); background: var(--surface); padding: 6px 12px; border-radius: 999px; opacity: 0.85; pointer-events: none; }
       @media (max-width: 720px) { .wb-hint { display: none; } .wb-size { width: 70px; } }
+
+      .ai-topic-row { display: flex; gap: 8px; flex-wrap: wrap; }
+      .ai-topic-row .parent-select { flex: 1; min-width: 150px; }
+      .ai-topic-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+      .img-pane-zoom { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--muted); margin: 6px 0 10px; }
+      .img-pane-zoom input { flex: 1; accent-color: var(--primary); }
+      .img-pane-list { display: flex; flex-direction: column; gap: 12px; }
+      .img-pane-item { margin: 0; overflow-x: auto; }
+      .img-pane-item img { display: block; max-width: none; border-radius: 14px; border: 1px solid var(--border); cursor: zoom-in; background: #fff; }
+      .img-pane-item figcaption { font-size: 12px; color: var(--muted); margin-top: 4px; }
 
       /* ---- AI panel ---- */
       .ai-modal { gap: 14px; }
