@@ -3998,6 +3998,25 @@ function BulkMoveModal({
 // feed live keystroke state back into it. Feeding live state back in would
 // make React reset the DOM (and the cursor position) on every keystroke.
 
+const RTE_TEXT_COLORS = [{
+  name: "Default",
+  hex: null
+}, {
+  name: "White",
+  hex: "#FFFFFF"
+}, {
+  name: "Yellow",
+  hex: "#FFD84D"
+}, {
+  name: "Red",
+  hex: "#E5484D"
+}, {
+  name: "Blue",
+  hex: "#2F80ED"
+}, {
+  name: "Teal",
+  hex: "#00A187"
+}];
 function RichTextEditor({
   initialHTML,
   onChange,
@@ -4016,6 +4035,65 @@ function RichTextEditor({
     if (editorRef.current) editorRef.current.focus();
     document.execCommand(cmd, false, value);
     if (editorRef.current) onChange(editorRef.current.innerHTML);
+  };
+
+  // The heading dropdown takes focus away from the text, so remember where the cursor/selection was.
+  const savedRangeRef = useRef(null);
+  const rememberSelection = () => {
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount && editorRef.current && editorRef.current.contains(sel.anchorNode)) {
+      savedRangeRef.current = sel.getRangeAt(0).cloneRange();
+    }
+  };
+  const applyHeading = tag => {
+    if (!tag) return;
+    if (editorRef.current) editorRef.current.focus();
+    const r = savedRangeRef.current;
+    if (r) {
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+    }
+    document.execCommand("formatBlock", false, tag);
+    if (editorRef.current) onChange(editorRef.current.innerHTML);
+  };
+
+  // Bullet shapes: a normal bullet list whose marker is a square, circle or arrow.
+  const applyBullet = kind => {
+    if (editorRef.current) editorRef.current.focus();
+    const sel = window.getSelection();
+    const listAtCursor = () => {
+      const n = sel && sel.anchorNode;
+      const el = n && (n.nodeType === 1 ? n : n.parentElement);
+      return el && el.closest ? el.closest("ul") : null;
+    };
+    let ul = listAtCursor();
+    if (!ul) {
+      document.execCommand("insertUnorderedList");
+      ul = listAtCursor();
+    }
+    if (ul) {
+      // The shape goes on each selected line, not the whole list, so one list can mix shapes.
+      const marker = kind === "arrow" ? '"➤  "' : kind;
+      const range = sel.rangeCount ? sel.getRangeAt(0) : null;
+      let items = range ? Array.from(ul.querySelectorAll("li")).filter(li => range.intersectsNode(li)) : [];
+      if (items.length === 0) {
+        const n = sel.anchorNode;
+        const el = n && (n.nodeType === 1 ? n : n.parentElement);
+        const li = el && el.closest ? el.closest("li") : null;
+        items = li ? [li] : [];
+      }
+      items.forEach(li => {
+        li.style.listStyleType = marker;
+      });
+    }
+    if (editorRef.current) onChange(editorRef.current.innerHTML);
+  };
+
+  // White and yellow are for dark note backgrounds; "Default" matches the editor's own text color.
+  const applyTextColor = hex => {
+    const color = hex || (editorRef.current ? getComputedStyle(editorRef.current).color : "#241C3D");
+    applyCmd("foreColor", color);
   };
   const deselectImage = () => {
     selectedImageElRef.current = null;
@@ -4268,17 +4346,46 @@ function RichTextEditor({
     title: "Underline",
     onMouseDown: e => e.preventDefault(),
     onClick: () => applyCmd("underline")
-  }, /*#__PURE__*/React.createElement("u", null, "U")), /*#__PURE__*/React.createElement("button", {
-    type: "button",
-    title: "Heading",
-    onMouseDown: e => e.preventDefault(),
-    onClick: () => applyCmd("formatBlock", "H3")
-  }, "H"), /*#__PURE__*/React.createElement("button", {
+  }, /*#__PURE__*/React.createElement("u", null, "U")), /*#__PURE__*/React.createElement("select", {
+    className: "rte-heading-select",
+    title: "Heading type",
+    value: "",
+    onMouseDown: rememberSelection,
+    onTouchStart: rememberSelection,
+    onChange: e => applyHeading(e.target.value)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "Heading\u2026"), /*#__PURE__*/React.createElement("option", {
+    value: "H1"
+  }, "Title"), /*#__PURE__*/React.createElement("option", {
+    value: "H2"
+  }, "Heading"), /*#__PURE__*/React.createElement("option", {
+    value: "H3"
+  }, "Subheading"), /*#__PURE__*/React.createElement("option", {
+    value: "H4"
+  }, "Small heading"), /*#__PURE__*/React.createElement("option", {
+    value: "P"
+  }, "Normal text")), /*#__PURE__*/React.createElement("button", {
     type: "button",
     title: "Bullet list",
     onMouseDown: e => e.preventDefault(),
     onClick: () => applyCmd("insertUnorderedList")
   }, "\u2022\u2014"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Square bullets",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyBullet("square")
+  }, "\u25A0"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Circle bullets",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyBullet("circle")
+  }, "\u25CB"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: "Arrow bullets",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyBullet("arrow")
+  }, "\u27A4"), /*#__PURE__*/React.createElement("button", {
     type: "button",
     title: "Numbered list",
     onMouseDown: e => e.preventDefault(),
@@ -4289,6 +4396,19 @@ function RichTextEditor({
     onMouseDown: e => e.preventDefault(),
     onClick: () => applyCmd("formatBlock", "P")
   }, "\xB6"), /*#__PURE__*/React.createElement("span", {
+    className: "rte-toolbar-divider"
+  }), RTE_TEXT_COLORS.map(c => /*#__PURE__*/React.createElement("button", {
+    key: c.name,
+    type: "button",
+    className: "rte-color-swatch",
+    style: {
+      background: c.hex || "var(--ink)"
+    },
+    title: "Text color — " + c.name,
+    "aria-label": "Text color " + c.name,
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => applyTextColor(c.hex)
+  })), /*#__PURE__*/React.createElement("span", {
     className: "rte-toolbar-divider"
   }), /*#__PURE__*/React.createElement("button", {
     type: "button",
@@ -4371,43 +4491,18 @@ function RichTextEditor({
     onClick: () => applyCmd("formatBlock", "P")
   }, "\xB6"), /*#__PURE__*/React.createElement("span", {
     className: "rte-toolbar-divider"
-  }), /*#__PURE__*/React.createElement("button", {
+  }), RTE_TEXT_COLORS.map(c => /*#__PURE__*/React.createElement("button", {
+    key: c.name,
     type: "button",
     className: "rte-color-swatch",
     style: {
-      background: "#241C3D"
+      background: c.hex || "#ccc"
     },
-    title: "Text color \u2014 default",
+    title: "Text color — " + c.name,
+    "aria-label": "Text color " + c.name,
     onMouseDown: e => e.preventDefault(),
-    onClick: () => applyCmd("foreColor", "#241C3D")
-  }), /*#__PURE__*/React.createElement("button", {
-    type: "button",
-    className: "rte-color-swatch",
-    style: {
-      background: "#E5484D"
-    },
-    title: "Text color \u2014 red",
-    onMouseDown: e => e.preventDefault(),
-    onClick: () => applyCmd("foreColor", "#E5484D")
-  }), /*#__PURE__*/React.createElement("button", {
-    type: "button",
-    className: "rte-color-swatch",
-    style: {
-      background: "#2F80ED"
-    },
-    title: "Text color \u2014 blue",
-    onMouseDown: e => e.preventDefault(),
-    onClick: () => applyCmd("foreColor", "#2F80ED")
-  }), /*#__PURE__*/React.createElement("button", {
-    type: "button",
-    className: "rte-color-swatch",
-    style: {
-      background: "#00A187"
-    },
-    title: "Text color \u2014 teal",
-    onMouseDown: e => e.preventDefault(),
-    onClick: () => applyCmd("foreColor", "#00A187")
-  }), /*#__PURE__*/React.createElement("span", {
+    onClick: () => applyTextColor(c.hex)
+  })), /*#__PURE__*/React.createElement("span", {
     className: "rte-toolbar-divider"
   }), /*#__PURE__*/React.createElement("button", {
     type: "button",
@@ -7203,7 +7298,8 @@ function Styles() {
       .note-card-preview mark.note-highlight { background: #FFF3C4; color: #241C3D; padding: 0 2px; border-radius: 3px; }
       .note-card-preview mark.note-highlight-red { background: #FFCDD2; color: #241C3D; }
       .note-card-preview mark.note-highlight-green { background: #C8F4DE; color: #241C3D; }
-      .note-card-preview h3 { font-size: 14px; margin: 4px 0; }
+      .note-card-preview h1, .note-card-preview h2 { font-size: 16px; margin: 4px 0; }
+      .note-card-preview h3, .note-card-preview h4 { font-size: 14px; margin: 4px 0; }
       .note-card-preview ul { margin: 4px 0; padding-left: 18px; }
       .note-card-tags { display: flex; flex-wrap: wrap; gap: 6px; }
       .note-thumb-strip { display: flex; gap: 4px; margin-top: 8px; align-items: center; }
@@ -7433,7 +7529,13 @@ function Styles() {
         outline: none;
       }
       .rte-body-tall { min-height: 55vh; max-height: none; overflow-y: visible; }
+      .rte-body h1 { font-size: 26px; font-weight: 700; margin: 12px 0 6px; }
+      .rte-body h2 { font-size: 21px; font-weight: 700; margin: 10px 0 5px; }
       .rte-body h3 { font-size: 16px; margin: 8px 0 4px; }
+      .rte-body h4 { font-size: 14px; font-weight: 700; margin: 6px 0 3px; text-transform: uppercase; letter-spacing: 0.04em; }
+      .rte-heading-select { font-family: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--ink); margin-right: 2px; }
+      .rte-toolbar .rte-color-swatch { width: 20px; height: 20px; padding: 0; border: 1px solid var(--border); border-radius: 50%; margin: 0 2px; }
+      .rte-toolbar .rte-color-swatch:hover { transform: scale(1.12); background-color: inherit; }
       .rte-body ul { padding-left: 20px; margin: 6px 0; }
       .rte-body:empty:before { content: attr(data-placeholder); color: var(--muted); }
       mark.note-highlight { background: #FFF3C4; color: #241C3D; padding: 0 2px; border-radius: 3px; }
