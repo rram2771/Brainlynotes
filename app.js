@@ -1295,6 +1295,7 @@ function Brainly() {
   const [showPinModal, setShowPinModal] = useState(null); // "set" | "change" | "remove" | null
   const [splitPane, setSplitPane] = useState(null); // null | { type: "note", note } | { type: "cards", noteId, subjectId, scope } | { type: "images", noteId, subjectId, scope }
   const [showTopicAi, setShowTopicAi] = useState(false);
+  const [showTags, setShowTags] = useState(false);
   const [appAi, setAppAi] = useState({
     apiKey: "",
     model: AI_MODELS[0].id
@@ -2606,6 +2607,61 @@ function Brainly() {
     await persist(merged);
   };
 
+  // ---- Tag management ----
+  const renameTag = async (tagId, newName) => {
+    const name = newName.trim();
+    const tag = data.tags.find(t => t.id === tagId);
+    if (!tag || !name || name === tag.name) return;
+    const clash = data.tags.find(t => t.id !== tagId && t.name.toLowerCase() === name.toLowerCase());
+    if (clash) {
+      // same name as another tag: merge this one into it
+      const notes = data.notes.map(n => (n.tagIds || []).includes(tagId) ? {
+        ...n,
+        tagIds: [...new Set(n.tagIds.map(id => id === tagId ? clash.id : id))]
+      } : n);
+      setSelectedTagIds(cur => [...new Set(cur.map(id => id === tagId ? clash.id : id))]);
+      await persist({
+        ...data,
+        tags: data.tags.filter(t => t.id !== tagId),
+        notes
+      });
+      showToast(`Merged into #${clash.name}`);
+      return;
+    }
+    await persist({
+      ...data,
+      tags: data.tags.map(t => t.id === tagId ? {
+        ...t,
+        name
+      } : t)
+    });
+    showToast(`Renamed to #${name}`);
+  };
+  const removeTagIds = async (idsToRemove, message) => {
+    const gone = new Set(idsToRemove);
+    setSelectedTagIds(cur => cur.filter(id => !gone.has(id)));
+    await persist({
+      ...data,
+      tags: data.tags.filter(t => !gone.has(t.id)),
+      notes: data.notes.map(n => (n.tagIds || []).some(id => gone.has(id)) ? {
+        ...n,
+        tagIds: n.tagIds.filter(id => !gone.has(id))
+      } : n)
+    });
+    showToast(message);
+  };
+  const deleteTag = tag => {
+    const used = data.notes.filter(n => (n.tagIds || []).includes(tag.id)).length;
+    askConfirm(`Delete the tag #${tag.name}?` + (used ? ` It will be removed from ${used} note${used === 1 ? "" : "s"}. The notes themselves stay.` : ""), () => removeTagIds([tag.id], `Deleted #${tag.name}`), "Delete tag");
+  };
+  const deleteUnusedTags = () => {
+    const usedIds = new Set();
+    data.notes.forEach(n => (n.tagIds || []).forEach(id => usedIds.add(id)));
+    const unusedIds = data.tags.filter(t => !usedIds.has(t.id)).map(t => t.id);
+    if (!unusedIds.length) return;
+    askConfirm(`Delete ${unusedIds.length} tag${unusedIds.length === 1 ? "" : "s"} that no note uses?`, () => removeTagIds(unusedIds, `Deleted ${unusedIds.length} unused tag${unusedIds.length === 1 ? "" : "s"}`), "Delete");
+  };
+
   // Direct clipping: the clipper bookmark opens Brainly in a new tab and hands the clip over with
   // postMessage. Nothing is added until the person confirms, and the clip is rebuilt from plain
   // text first (see sanitizeClipPayload).
@@ -2886,7 +2942,13 @@ function Brainly() {
     title: "Type a topic and get a full nursing study note"
   }, /*#__PURE__*/React.createElement(NavIcon, {
     name: "sparkle"
-  }), " AI notes"), /*#__PURE__*/React.createElement("div", {
+  }), " AI notes"), /*#__PURE__*/React.createElement("button", {
+    className: "home-nav-btn",
+    onClick: () => setShowTags(true),
+    title: "See, rename and delete your tags"
+  }, /*#__PURE__*/React.createElement(NavIcon, {
+    name: "tag"
+  }), " Tags"), /*#__PURE__*/React.createElement("div", {
     className: "subject-list"
   }, topSubjects.length === 0 && /*#__PURE__*/React.createElement("div", {
     className: "empty-hint"
@@ -3368,7 +3430,14 @@ function Brainly() {
       });
       setShowReview(true);
     }
-  })), showTopicAi && /*#__PURE__*/React.createElement(AiTopicModal, {
+  })), showTags && /*#__PURE__*/React.createElement(TagsManager, {
+    tags: data.tags,
+    notes: data.notes,
+    onRename: renameTag,
+    onDelete: deleteTag,
+    onDeleteUnused: deleteUnusedTags,
+    onClose: () => setShowTags(false)
+  }), showTopicAi && /*#__PURE__*/React.createElement(AiTopicModal, {
     settings: appAi,
     onSettingsChange: setAppAi,
     subjectOptions: flatSubjectOptions,
@@ -9030,6 +9099,96 @@ function SplitImagesPanel({
   }), scope === "subject" && it.noteTitle && /*#__PURE__*/React.createElement("figcaption", null, it.noteTitle))))));
 }
 
+// ---------- Tags manager: see every tag, rename it, merge it, or delete it ----------
+
+function TagsManager({
+  tags,
+  notes,
+  onRename,
+  onDelete,
+  onDeleteUnused,
+  onClose
+}) {
+  const [filter, setFilter] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [draft, setDraft] = useState("");
+  const counts = useMemo(() => {
+    const c = {};
+    notes.forEach(n => (n.tagIds || []).forEach(id => {
+      c[id] = (c[id] || 0) + 1;
+    }));
+    return c;
+  }, [notes]);
+  const rows = tags.filter(t => t.name.toLowerCase().includes(filter.trim().toLowerCase())).sort((a, b) => a.name.localeCompare(b.name));
+  const unused = tags.filter(t => !counts[t.id]).length;
+  const commit = () => {
+    if (editingId && draft.trim()) onRename(editingId, draft.trim());
+    setEditingId(null);
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    className: "modal-backdrop",
+    onClick: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal wide tags-modal",
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal-header"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "eyebrow"
+  }, "Tags (", tags.length, ")"), /*#__PURE__*/React.createElement("button", {
+    className: "modal-close",
+    onClick: onClose
+  }, "\u2715")), /*#__PURE__*/React.createElement("p", {
+    className: "modal-copy"
+  }, "Rename a tag to fix it everywhere. If the new name already exists, the two tags are merged. Deleting a tag removes it from your notes but never deletes the notes."), /*#__PURE__*/React.createElement("input", {
+    className: "url-input",
+    placeholder: "Search tags\u2026",
+    value: filter,
+    onChange: e => setFilter(e.target.value)
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "tags-list"
+  }, rows.length === 0 && /*#__PURE__*/React.createElement("p", {
+    className: "empty-hint"
+  }, tags.length === 0 ? "No tags yet. Add tags to a note and they show up here." : "No tags match."), rows.map(t => /*#__PURE__*/React.createElement("div", {
+    key: t.id,
+    className: "tags-row"
+  }, editingId === t.id ? /*#__PURE__*/React.createElement("input", {
+    className: "url-input",
+    autoFocus: true,
+    value: draft,
+    onChange: e => setDraft(e.target.value),
+    onKeyDown: e => {
+      if (e.key === "Enter") commit();
+      if (e.key === "Escape") setEditingId(null);
+    },
+    onBlur: commit
+  }) : /*#__PURE__*/React.createElement("span", {
+    className: "tags-name"
+  }, "#", t.name), /*#__PURE__*/React.createElement("span", {
+    className: "tags-count"
+  }, counts[t.id] || 0, " note", (counts[t.id] || 0) === 1 ? "" : "s"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small",
+    onMouseDown: e => e.preventDefault(),
+    onClick: () => {
+      setEditingId(t.id);
+      setDraft(t.name);
+    },
+    title: "Rename"
+  }, "\u270E Edit"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small danger",
+    onClick: () => onDelete(t),
+    title: "Delete this tag"
+  }, "\u2715 Delete")))), /*#__PURE__*/React.createElement("div", {
+    className: "modal-actions"
+  }, unused > 0 && /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost danger",
+    onClick: onDeleteUnused
+  }, "Delete ", unused, " unused tag", unused === 1 ? "" : "s"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary",
+    onClick: onClose
+  }, "Done"))));
+}
+
 // ---------- Icons ----------
 
 const NAV_ICON_PATHS = {
@@ -9066,6 +9225,13 @@ const NAV_ICON_PATHS = {
     d: "M10 20a2 2 0 0 0 4 0"
   }), /*#__PURE__*/React.createElement("path", {
     d: "M3 3l18 18"
+  })),
+  tag: /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("path", {
+    d: "M3 12V4h8l10 10-8 8z"
+  }), /*#__PURE__*/React.createElement("circle", {
+    cx: "7.5",
+    cy: "8.5",
+    r: "1.2"
   })),
   lock: /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("rect", {
     x: "4",
@@ -10070,6 +10236,12 @@ function Styles() {
       .ai-links { display: flex; flex-direction: column; gap: 6px; }
       .review-speak { position: absolute; top: 10px; left: 12px; width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); font-size: 16px; display: inline-flex; align-items: center; justify-content: center; z-index: 2; }
       .review-speak:hover { background: var(--soft); }
+      .tags-modal { gap: 12px; }
+      .tags-list { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; }
+      .tags-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 16px; }
+      .tags-row .url-input { flex: 1; padding: 6px 12px; }
+      .tags-name { flex: 1; font-weight: 600; word-break: break-word; }
+      .tags-count { font-size: 12px; color: var(--muted); white-space: nowrap; }
       .ai-topic-row { display: flex; gap: 8px; flex-wrap: wrap; }
       .ai-topic-row .parent-select { flex: 1; min-width: 150px; }
       .ai-topic-tags { display: flex; gap: 6px; flex-wrap: wrap; }
