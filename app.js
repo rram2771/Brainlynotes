@@ -6975,7 +6975,8 @@ async function loadAiSettings() {
     const s = res && res.value ? JSON.parse(res.value) : {};
     return {
       apiKey: s.apiKey || "",
-      model: s.model || AI_MODELS[0].id
+      model: s.model || AI_MODELS[0].id,
+      workspaceId: s.workspaceId || ""
     };
   } catch (e) {
     return {
@@ -6987,7 +6988,8 @@ async function loadAiSettings() {
 async function saveAiSettings(settings) {
   await storage.set(AI_SETTINGS_KEY, JSON.stringify({
     apiKey: settings.apiKey || "",
-    model: settings.model || AI_MODELS[0].id
+    model: settings.model || AI_MODELS[0].id,
+    workspaceId: settings.workspaceId || ""
   }));
 }
 
@@ -7011,7 +7013,10 @@ async function callClaude(settings, {
         "content-type": "application/json",
         "x-api-key": settings.apiKey,
         "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true"
+        "anthropic-dangerous-direct-browser-access": "true",
+        ...(settings.workspaceId ? {
+          "anthropic-workspace-id": settings.workspaceId
+        } : {})
       },
       body: JSON.stringify({
         model: settings.model || AI_MODELS[0].id,
@@ -7029,6 +7034,9 @@ async function callClaude(settings, {
       const j = await res.json();
       detail = j && j.error && j.error.message ? j.error.message : "";
     } catch (e) {/* no body */}
+    if (res.status === 400 && /workspace/i.test(detail)) {
+      throw new Error("Your key isn't tied to a workspace, so Claude needs the Workspace ID too. In console.anthropic.com open Settings → Workspaces, copy the workspace's ID (starts with wrkspc_), and paste it into the Workspace ID box on the Files page → AI. Or create a new key from inside a workspace.");
+    }
     if (res.status === 401) throw new Error("Claude rejected that API key. Check it on the Files page → AI.");
     if (res.status === 429) throw new Error("Too many requests or your usage limit was reached. Wait a moment and try again.");
     if (res.status === 529 || res.status >= 500) throw new Error("Claude is busy right now. Try again in a minute.");
@@ -7226,17 +7234,20 @@ function AiKeyForm({
 }) {
   const [key, setKey] = useState(settings.apiKey || "");
   const [model, setModel] = useState(settings.model);
+  const [workspaceId, setWorkspaceId] = useState(settings.workspaceId || "");
   const [show, setShow] = useState(false);
   const [msg, setMsg] = useState("");
   const save = async () => {
     try {
       await saveAiSettings({
         apiKey: key.trim(),
-        model
+        model,
+        workspaceId: workspaceId.trim()
       });
       onSaved({
         apiKey: key.trim(),
-        model
+        model,
+        workspaceId: workspaceId.trim()
       });
       setMsg(key.trim() ? "Saved on this device." : "Key removed.");
     } catch (e) {
@@ -7263,6 +7274,17 @@ function AiKeyForm({
     onClick: () => setShow(s => !s)
   }, show ? "Hide" : "Show")), /*#__PURE__*/React.createElement("label", {
     className: "field-label"
+  }, "Workspace ID ", /*#__PURE__*/React.createElement("span", {
+    className: "hint-line"
+  }, "(only if Claude says your key needs one)")), /*#__PURE__*/React.createElement("input", {
+    className: "url-input",
+    placeholder: "wrkspc_\u2026",
+    value: workspaceId,
+    onChange: e => setWorkspaceId(e.target.value),
+    autoComplete: "off",
+    spellCheck: false
+  }), /*#__PURE__*/React.createElement("label", {
+    className: "field-label"
   }, "Model"), /*#__PURE__*/React.createElement("select", {
     className: "parent-select",
     value: model,
@@ -7283,11 +7305,13 @@ function AiKeyForm({
       setKey("");
       saveAiSettings({
         apiKey: "",
-        model
+        model,
+        workspaceId: workspaceId.trim()
       }).then(() => {
         onSaved({
           apiKey: "",
-          model
+          model,
+          workspaceId: workspaceId.trim()
         });
         setMsg("Key removed.");
       });
