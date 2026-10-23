@@ -3401,6 +3401,13 @@ function FilesPage({
   onMarkdownFile,
   onAddArticle
 }) {
+  const [aiSettings, setAiSettings] = useState({
+    apiKey: "",
+    model: AI_MODELS[0].id
+  });
+  useEffect(() => {
+    loadAiSettings().then(setAiSettings);
+  }, []);
   return /*#__PURE__*/React.createElement("div", {
     className: "files-page"
   }, /*#__PURE__*/React.createElement("div", {
@@ -3487,7 +3494,15 @@ function FilesPage({
     href: "https://rram2771.github.io/Brainlynotes/clip.html",
     target: "_blank",
     rel: "noopener"
-  }, "the clipper page"), " in your computer\u2019s browser, drag its button to your bookmarks bar, then click it on any article. It saves a small file; load it here with ", /*#__PURE__*/React.createElement("b", null, "Upload a subject file"), " (section 3). It lands in \u201CWeb clippings\u201D, and any ", /*#__PURE__*/React.createElement("i", null, "question :: answer"), " lines become cards."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Share from other apps"), " \u2014 on Android, use ", /*#__PURE__*/React.createElement("b", null, "Share \u2192 Brainly"), " in any app to drop text or a link into your \u201CReview\u201D subject."))), /*#__PURE__*/React.createElement("p", {
+  }, "the clipper page"), " in your computer\u2019s browser, drag its button to your bookmarks bar, then click it on any article. It saves a small file; load it here with ", /*#__PURE__*/React.createElement("b", null, "Upload a subject file"), " (section 3). It lands in \u201CWeb clippings\u201D, and any ", /*#__PURE__*/React.createElement("i", null, "question :: answer"), " lines become cards."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Share from other apps"), " \u2014 on Android, use ", /*#__PURE__*/React.createElement("b", null, "Share \u2192 Brainly"), " in any app to drop text or a link into your \u201CReview\u201D subject."))), /*#__PURE__*/React.createElement("section", {
+    className: "files-card"
+  }, /*#__PURE__*/React.createElement("h2", null, "5 \xB7 AI helper (Claude)"), /*#__PURE__*/React.createElement("p", null, "Optional. With your own Claude API key, the ", /*#__PURE__*/React.createElement("b", null, "\u2726 AI"), " button inside a note can format it, answer questions about it, make flashcards, a mind map or slides, and turn a drawing into typed notes."), /*#__PURE__*/React.createElement(AiKeyForm, {
+    key: aiSettings.apiKey ? "k" : "n",
+    settings: aiSettings,
+    onSaved: setAiSettings
+  }), /*#__PURE__*/React.createElement("ul", {
+    className: "files-steps"
+  }, /*#__PURE__*/React.createElement("li", null, "Get a key at ", /*#__PURE__*/React.createElement("b", null, "console.anthropic.com"), " \u2192 API keys. Usage is billed by Anthropic, separately from a Claude chat subscription."), /*#__PURE__*/React.createElement("li", null, "The key is stored only on this device and is never part of a backup file."), /*#__PURE__*/React.createElement("li", null, "A note's text (and any picture you ask it to read) is sent to Claude only when you press an AI button. Leave out patient names and other identifying details."))), /*#__PURE__*/React.createElement("p", {
     className: "files-note"
   }, "Everything stays on this device unless you download it. Clearing this site's data, or uninstalling the app, deletes your notes \u2014 so keep a backup file in Drive."));
 }
@@ -4881,10 +4896,10 @@ function DrawingCanvas({
     }, 0);
   };
   return /*#__PURE__*/React.createElement("div", {
-    className: "modal-backdrop",
+    className: "modal-backdrop draw-fullscreen",
     onClick: onCancel
   }, /*#__PURE__*/React.createElement("div", {
-    className: "modal wide",
+    className: "modal wide draw-fullscreen",
     onClick: e => e.stopPropagation()
   }, /*#__PURE__*/React.createElement("div", {
     className: "modal-header"
@@ -5563,12 +5578,13 @@ function QuickAddNote({
   }, "Close"), /*#__PURE__*/React.createElement("button", {
     className: "btn-primary",
     onClick: handleSubmit
-  }, "Add")))), showDraw && /*#__PURE__*/React.createElement(DrawingCanvas, {
+  }, "Add")))), showDraw && /*#__PURE__*/React.createElement(Whiteboard, {
     onCancel: () => setShowDraw(false),
-    onSave: dataUrl => {
+    onSave: (dataUrl, board) => {
       setImages(cur => [...cur, {
         id: uid(),
-        dataUrl
+        dataUrl,
+        board
       }]);
       setShowDraw(false);
     }
@@ -5693,7 +5709,27 @@ function NoteEditor({
   const [imgError, setImgError] = useState("");
   const [showDraw, setShowDraw] = useState(false);
   const [pendingHighlight, setPendingHighlight] = useState(null); // { front, back } | null
-
+  const [showAi, setShowAi] = useState(false);
+  const [aiSettings, setAiSettings] = useState({
+    apiKey: "",
+    model: AI_MODELS[0].id
+  });
+  useEffect(() => {
+    loadAiSettings().then(setAiSettings);
+  }, []);
+  // The text editor only reads its starting text once, so replacing the note's text from the AI
+  // panel restarts it with the new text.
+  const [seed, setSeed] = useState({
+    v: 0,
+    html: note.bodyHTML || ""
+  });
+  const replaceBody = html => {
+    setBodyHTML(html);
+    setSeed(s => ({
+      v: s.v + 1,
+      html
+    }));
+  };
   const addTagFromInput = () => {
     const parts = tagInput.split(",").map(p => p.trim()).filter(Boolean);
     if (!parts.length) return;
@@ -5931,7 +5967,8 @@ function NoteEditor({
     key: s.id,
     value: s.id
   }, s.label)))), /*#__PURE__*/React.createElement(RichTextEditor, {
-    initialHTML: note.bodyHTML || "",
+    key: seed.v,
+    initialHTML: seed.html,
     placeholder: "Write or paste your note here\u2026",
     onChange: setBodyHTML,
     onImageError: onImageError,
@@ -5977,7 +6014,10 @@ function NoteEditor({
   })), /*#__PURE__*/React.createElement("button", {
     className: "btn-ghost small",
     onClick: () => setShowDraw(true)
-  }, "\u270E Draw"), imgError && /*#__PURE__*/React.createElement("span", {
+  }, "\u270E Draw"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-primary small",
+    onClick: () => setShowAi(true)
+  }, "\u2726 AI"), imgError && /*#__PURE__*/React.createElement("span", {
     className: "gen-error"
   }, imgError)), images.length > 0 && /*#__PURE__*/React.createElement("div", {
     className: "image-thumbs"
@@ -6003,7 +6043,21 @@ function NoteEditor({
     className: "image-thumb-occlude",
     title: "Make occlusion cards from this image",
     onClick: () => onOccludeImage(img.dataUrl, note.id)
-  }, "\u25A7")))), annotatingThumb && /*#__PURE__*/React.createElement(DrawingCanvas, {
+  }, "\u25A7")))), annotatingThumb && annotatingThumb.board &&
+  /*#__PURE__*/
+  // A drawing made on the whiteboard reopens there, with every stroke still editable.
+  React.createElement(Whiteboard, {
+    initialBoard: annotatingThumb.board,
+    onCancel: () => setAnnotatingThumb(null),
+    onSave: (dataUrl, board) => {
+      setImages(cur => cur.map(im => im.id === annotatingThumb.id ? {
+        ...im,
+        dataUrl,
+        board
+      } : im));
+      setAnnotatingThumb(null);
+    }
+  }), annotatingThumb && !annotatingThumb.board && /*#__PURE__*/React.createElement(DrawingCanvas, {
     backgroundImageUrl: annotatingThumb.dataUrl,
     onCancel: () => setAnnotatingThumb(null),
     onSave: dataUrl => {
@@ -6115,15 +6169,29 @@ function NoteEditor({
     className: "btn-primary",
     onClick: handleSave,
     disabled: !noteHasContent(title, bodyHTML, images)
-  }, "Save note")), showDraw && /*#__PURE__*/React.createElement(DrawingCanvas, {
+  }, "Save note")), showDraw && /*#__PURE__*/React.createElement(Whiteboard, {
     onCancel: () => setShowDraw(false),
-    onSave: dataUrl => {
+    onSave: (dataUrl, board) => {
       setImages(cur => [...cur, {
         id: uid(),
-        dataUrl
+        dataUrl,
+        board
       }]);
       setShowDraw(false);
     }
+  }), showAi && /*#__PURE__*/React.createElement(AiPanel, {
+    title: title,
+    bodyHTML: bodyHTML,
+    images: images,
+    settings: aiSettings,
+    onSettingsChange: setAiSettings,
+    onReplaceBody: replaceBody,
+    onAppendHTML: html => replaceBody((bodyHTML || "") + html),
+    onAddImage: dataUrl => setImages(cur => [...cur, {
+      id: uid(),
+      dataUrl
+    }]),
+    onClose: () => setShowAi(false)
   }));
 }
 
@@ -6883,6 +6951,1295 @@ function MatchGame({
       onClick: () => handleTap(tile)
     }, tile.text);
   }))));
+}
+
+// ---------- Claude AI helpers ----------
+// The key is typed in by the person using the app and kept only on this device, in its own
+// storage entry (never inside the notes data, so backups and exports don't carry it). Notes are
+// sent to Anthropic only when one of the AI buttons is pressed.
+
+const AI_SETTINGS_KEY = "brainly-ai-settings";
+const AI_MODELS = [{
+  id: "claude-sonnet-5-5",
+  label: "Sonnet 5.5 — balanced (recommended)"
+}, {
+  id: "claude-haiku-5-5",
+  label: "Haiku 5.5 — fastest and cheapest"
+}, {
+  id: "claude-opus-5-5",
+  label: "Opus 5.5 — most capable, costs more"
+}];
+async function loadAiSettings() {
+  try {
+    const res = await storage.get(AI_SETTINGS_KEY);
+    const s = res && res.value ? JSON.parse(res.value) : {};
+    return {
+      apiKey: s.apiKey || "",
+      model: s.model || AI_MODELS[0].id
+    };
+  } catch (e) {
+    return {
+      apiKey: "",
+      model: AI_MODELS[0].id
+    };
+  }
+}
+async function saveAiSettings(settings) {
+  await storage.set(AI_SETTINGS_KEY, JSON.stringify({
+    apiKey: settings.apiKey || "",
+    model: settings.model || AI_MODELS[0].id
+  }));
+}
+
+// One call to Claude. `content` is a string, or an array of blocks (for images). Returns the text.
+async function callClaude(settings, {
+  system,
+  content,
+  history,
+  maxTokens = 4000
+}) {
+  if (!settings || !settings.apiKey) throw new Error("Add your Claude API key first (Files page → AI).");
+  const messages = history && history.length ? history : [{
+    role: "user",
+    content
+  }];
+  let res;
+  try {
+    res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": settings.apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true"
+      },
+      body: JSON.stringify({
+        model: settings.model || AI_MODELS[0].id,
+        max_tokens: maxTokens,
+        system,
+        messages
+      })
+    });
+  } catch (e) {
+    throw new Error("Couldn't reach Claude — check your internet connection and try again.");
+  }
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const j = await res.json();
+      detail = j && j.error && j.error.message ? j.error.message : "";
+    } catch (e) {/* no body */}
+    if (res.status === 401) throw new Error("Claude rejected that API key. Check it on the Files page → AI.");
+    if (res.status === 429) throw new Error("Too many requests or your usage limit was reached. Wait a moment and try again.");
+    if (res.status === 529 || res.status >= 500) throw new Error("Claude is busy right now. Try again in a minute.");
+    throw new Error("Claude returned an error (" + res.status + ")" + (detail ? ": " + detail : "."));
+  }
+  const data = await res.json();
+  return (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n").trim();
+}
+
+// Models sometimes wrap JSON in prose or code fences; pull the JSON out either way.
+function aiParseJSON(text) {
+  let t = String(text || "").trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+  const firstObj = t.indexOf("{");
+  const firstArr = t.indexOf("[");
+  let start = -1;
+  if (firstObj === -1) start = firstArr;else if (firstArr === -1) start = firstObj;else start = Math.min(firstObj, firstArr);
+  if (start === -1) throw new Error("Claude's answer wasn't in the expected format. Try again.");
+  const open = t[start];
+  const end = t.lastIndexOf(open === "{" ? "}" : "]");
+  if (end <= start) throw new Error("Claude's answer was cut off. Try again.");
+  return JSON.parse(t.slice(start, end + 1));
+}
+
+// Keeps only the tags the editor understands; drops scripts, styles, attributes and everything else.
+function aiSanitizeHTML(html) {
+  const doc = new DOMParser().parseFromString("<div>" + String(html || "") + "</div>", "text/html");
+  const ALLOWED = new Set(["H1", "H2", "H3", "H4", "P", "UL", "OL", "LI", "B", "STRONG", "I", "EM", "U", "BR"]);
+  const clean = node => {
+    let out = "";
+    node.childNodes.forEach(c => {
+      if (c.nodeType === 3) out += escapeHTML(c.nodeValue);else if (c.nodeType === 1) {
+        const tag = c.tagName;
+        if (tag === "SCRIPT" || tag === "STYLE") return;
+        const inner = clean(c);
+        if (ALLOWED.has(tag)) {
+          const t = tag.toLowerCase();
+          out += t === "br" ? "<br>" : "<" + t + ">" + inner + "</" + t + ">";
+        } else out += inner;
+      }
+    });
+    return out;
+  };
+  return clean(doc.body.firstChild);
+}
+
+// Inline pictures would bloat the request, so they're swapped for [[IMAGE n]] markers before
+// sending and put back afterwards.
+function aiNoteForPrompt(bodyHTML) {
+  const doc = new DOMParser().parseFromString("<div>" + (bodyHTML || "") + "</div>", "text/html");
+  const imgs = [];
+  doc.body.querySelectorAll("img").forEach(img => {
+    imgs.push(img.outerHTML);
+    img.replaceWith(doc.createTextNode("[[IMAGE " + imgs.length + "]]"));
+  });
+  return {
+    html: doc.body.firstChild.innerHTML,
+    text: htmlToPlainText(doc.body.firstChild.innerHTML),
+    imgs
+  };
+}
+function aiRestoreImages(html, imgs) {
+  return imgs.reduce((acc, tag, i) => acc.split("[[IMAGE " + (i + 1) + "]]").join(tag), html);
+}
+const AI_SYSTEM = "You are a careful study-notes assistant inside a notes app used by a cardiac stress-test nurse. " + "Never invent medical facts; if something is unclear or missing, say so instead of guessing. " + "Never add patient names or identifiers. Keep the user's meaning and wording where possible.";
+function dataUrlToImageBlock(dataUrl) {
+  const m = /^data:(image\/[a-z+.-]+);base64,(.+)$/i.exec(dataUrl || "");
+  if (!m) return null;
+  return {
+    type: "image",
+    source: {
+      type: "base64",
+      media_type: m[1],
+      data: m[2]
+    }
+  };
+}
+
+// ---------- Mind map drawing (plain SVG, no library) ----------
+
+const MINDMAP_COLORS = ["#3E7CAB", "#3F9A8C", "#D98F78", "#B48D2B", "#8B9A63", "#7E9ED8", "#A5A8E3", "#C0569A"];
+function mindMapLayout(tree) {
+  const NODE_H = 34,
+    GAP_Y = 12,
+    COL_GAP = 60;
+  const clip = s => {
+    const t = String(s || "").trim();
+    return t.length > 34 ? t.slice(0, 33) + "…" : t;
+  };
+  const nodes = [];
+  const edges = [];
+  const widths = (label, size) => Math.max(70, Math.round(label.length * size * 0.56) + 28);
+  let leafY = 0;
+  const walk = (n, depth, color) => {
+    const label = clip(n.label || n.center || "");
+    const node = {
+      label,
+      depth,
+      color,
+      w: widths(label, depth === 0 ? 17 : 14)
+    };
+    node.children = (n.children || n.branches || []).map((c, i) => walk(c, depth + 1, depth === 0 ? MINDMAP_COLORS[i % MINDMAP_COLORS.length] : color));
+    if (node.children.length === 0) {
+      node.y = leafY;
+      leafY += NODE_H + GAP_Y;
+    } else {
+      node.y = (node.children[0].y + node.children[node.children.length - 1].y) / 2;
+    }
+    nodes.push(node);
+    return node;
+  };
+  const root = walk({
+    label: tree.center || tree.label || "Mind map",
+    children: tree.branches || tree.children || []
+  }, 0, MINDMAP_COLORS[0]);
+  const colW = [];
+  nodes.forEach(n => {
+    colW[n.depth] = Math.max(colW[n.depth] || 0, n.w);
+  });
+  const colX = [];
+  let x = 20;
+  colW.forEach((w, d) => {
+    colX[d] = x;
+    x += w + COL_GAP;
+  });
+  nodes.forEach(n => {
+    n.x = colX[n.depth];
+    n.y = n.y + 20;
+  });
+  nodes.forEach(n => n.children.forEach(c => edges.push({
+    from: n,
+    to: c
+  })));
+  return {
+    nodes,
+    edges,
+    width: x - COL_GAP + 20,
+    height: Math.max(leafY, NODE_H) + 40,
+    root,
+    NODE_H
+  };
+}
+function mindMapSVG(tree) {
+  const L = mindMapLayout(tree);
+  const esc = escapeHTML;
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${L.width}" height="${L.height}" viewBox="0 0 ${L.width} ${L.height}" font-family="Urbanist, system-ui, sans-serif">`;
+  svg += `<rect width="100%" height="100%" fill="#ffffff"/>`;
+  L.edges.forEach(({
+    from,
+    to
+  }) => {
+    const x1 = from.x + from.w,
+      y1 = from.y + L.NODE_H / 2,
+      x2 = to.x,
+      y2 = to.y + L.NODE_H / 2;
+    const mx = (x1 + x2) / 2;
+    svg += `<path d="M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}" fill="none" stroke="${to.color}" stroke-width="2.2" opacity="0.8"/>`;
+  });
+  L.nodes.forEach(n => {
+    const root = n.depth === 0;
+    svg += `<rect x="${n.x}" y="${n.y}" width="${n.w}" height="${L.NODE_H}" rx="17" fill="${root ? "#17171B" : n.color}" fill-opacity="${root ? 1 : n.depth === 1 ? 1 : 0.18}" stroke="${n.color}" stroke-width="${n.depth > 1 ? 1.5 : 0}"/>`;
+    svg += `<text x="${n.x + n.w / 2}" y="${n.y + L.NODE_H / 2 + 5}" text-anchor="middle" font-size="${root ? 17 : 14}" font-weight="${n.depth <= 1 ? 700 : 500}" fill="${root || n.depth === 1 ? "#ffffff" : "#17171B"}">${esc(n.label)}</text>`;
+  });
+  return {
+    svg: svg + "</svg>",
+    width: L.width,
+    height: L.height
+  };
+}
+
+// SVG string -> PNG data URL, so a mind map can be attached to a note like any other picture.
+function svgToPngDataUrl(svg, width, height) {
+  return new Promise((resolve, reject) => {
+    const scale = Math.min(2, 2400 / Math.max(width, height));
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement("canvas");
+      c.width = Math.round(width * scale);
+      c.height = Math.round(height * scale);
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, c.width, c.height);
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      resolve(c.toDataURL("image/png"));
+    };
+    img.onerror = () => reject(new Error("Couldn't turn the mind map into a picture."));
+    img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+  });
+}
+
+// ---------- API key form (Files page and the AI panel) ----------
+
+function AiKeyForm({
+  settings,
+  onSaved
+}) {
+  const [key, setKey] = useState(settings.apiKey || "");
+  const [model, setModel] = useState(settings.model);
+  const [show, setShow] = useState(false);
+  const [msg, setMsg] = useState("");
+  const save = async () => {
+    try {
+      await saveAiSettings({
+        apiKey: key.trim(),
+        model
+      });
+      onSaved({
+        apiKey: key.trim(),
+        model
+      });
+      setMsg(key.trim() ? "Saved on this device." : "Key removed.");
+    } catch (e) {
+      setMsg("Couldn't save: " + e.message);
+    }
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    className: "ai-key-form"
+  }, /*#__PURE__*/React.createElement("label", {
+    className: "field-label"
+  }, "Claude API key"), /*#__PURE__*/React.createElement("div", {
+    className: "ai-key-row"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "url-input",
+    type: show ? "text" : "password",
+    placeholder: "sk-ant-\u2026",
+    value: key,
+    onChange: e => setKey(e.target.value),
+    autoComplete: "off",
+    spellCheck: false
+  }), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "btn-ghost small",
+    onClick: () => setShow(s => !s)
+  }, show ? "Hide" : "Show")), /*#__PURE__*/React.createElement("label", {
+    className: "field-label"
+  }, "Model"), /*#__PURE__*/React.createElement("select", {
+    className: "parent-select",
+    value: model,
+    onChange: e => setModel(e.target.value)
+  }, AI_MODELS.map(m => /*#__PURE__*/React.createElement("option", {
+    key: m.id,
+    value: m.id
+  }, m.label))), /*#__PURE__*/React.createElement("div", {
+    className: "files-actions"
+  }, /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "btn-primary small",
+    onClick: save
+  }, "Save"), settings.apiKey && /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "btn-ghost small danger",
+    onClick: () => {
+      setKey("");
+      saveAiSettings({
+        apiKey: "",
+        model
+      }).then(() => {
+        onSaved({
+          apiKey: "",
+          model
+        });
+        setMsg("Key removed.");
+      });
+    }
+  }, "Remove key"), msg && /*#__PURE__*/React.createElement("span", {
+    className: "hint-line"
+  }, msg)));
+}
+
+// ---------- AI panel for a note ----------
+
+const AI_ACTIONS = [{
+  id: "format",
+  icon: "✦",
+  label: "Format",
+  hint: "Tidy the note into clear headings and bullets"
+}, {
+  id: "ask",
+  icon: "?",
+  label: "Ask",
+  hint: "Ask questions about this note"
+}, {
+  id: "cards",
+  icon: "▤",
+  label: "Flashcards",
+  hint: "Make question :: answer cards"
+}, {
+  id: "mindmap",
+  icon: "◎",
+  label: "Mind map",
+  hint: "A simple map you can attach to the note"
+}, {
+  id: "slides",
+  icon: "▭",
+  label: "Slides",
+  hint: "Turn the note into a short slide deck"
+}, {
+  id: "drawing",
+  icon: "✎",
+  label: "Read drawing",
+  hint: "Turn a drawing or photo into typed notes"
+}];
+function AiPanel({
+  title,
+  bodyHTML,
+  images,
+  settings,
+  onSettingsChange,
+  onReplaceBody,
+  onAppendHTML,
+  onAddImage,
+  onClose
+}) {
+  const [mode, setMode] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(null); // shape depends on mode
+  const [chat, setChat] = useState([]);
+  const [question, setQuestion] = useState("");
+  const [picked, setPicked] = useState({});
+  const [slideIdx, setSlideIdx] = useState(0);
+  const [imgIdx, setImgIdx] = useState(0);
+  const note = useMemo(() => aiNoteForPrompt(bodyHTML), [bodyHTML]);
+  const noteText = (title ? title + "\n\n" : "") + note.text;
+  const hasKey = !!settings.apiKey;
+  const run = async fn => {
+    setBusy(true);
+    setError("");
+    try {
+      await fn();
+    } catch (e) {
+      setError(e.message || "Something went wrong.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const choose = id => {
+    setMode(id);
+    setResult(null);
+    setError("");
+    setPicked({});
+    setSlideIdx(0);
+  };
+  const needText = () => {
+    if (!note.text.trim() && !title.trim()) throw new Error("This note is empty — write something first.");
+  };
+  const doFormat = () => run(async () => {
+    needText();
+    const out = await callClaude(settings, {
+      system: AI_SYSTEM + " Reformat the note the user sends. Return ONLY HTML using just these tags: h2, h3, p, ul, ol, li, b, i. Fix spelling and structure, group related points under short headings, keep every fact, and keep any [[IMAGE n]] markers exactly where they are. Lines written as 'question :: answer' must stay as separate <p> lines in that exact form.",
+      content: note.html
+    });
+    setResult({
+      html: aiRestoreImages(aiSanitizeHTML(out.replace(/^```(?:html)?/i, "").replace(/```$/, "")), note.imgs)
+    });
+  });
+  const sendQuestion = () => run(async () => {
+    const q = question.trim();
+    if (!q) return;
+    needText();
+    const history = [...chat, {
+      role: "user",
+      content: q
+    }];
+    setChat(history);
+    setQuestion("");
+    const out = await callClaude(settings, {
+      system: AI_SYSTEM + " Answer the user's questions using the note below. If the note doesn't cover something, say so, then add general knowledge clearly labelled as such. Be concise.\n\nNOTE:\n" + noteText,
+      history,
+      maxTokens: 1500
+    });
+    setChat([...history, {
+      role: "assistant",
+      content: out
+    }]);
+  });
+  const doCards = () => run(async () => {
+    needText();
+    const out = await callClaude(settings, {
+      system: AI_SYSTEM + " Make study flashcards from the note. Return ONLY JSON: an array of {\"q\": string, \"a\": string}. 6 to 14 cards, one fact per card, short answers. Use only what the note says.",
+      content: noteText
+    });
+    const cards = aiParseJSON(out).filter(c => c && c.q && c.a);
+    if (!cards.length) throw new Error("No cards came back. Try again.");
+    setResult({
+      cards
+    });
+    const all = {};
+    cards.forEach((_, i) => {
+      all[i] = true;
+    });
+    setPicked(all);
+  });
+  const doMindMap = () => run(async () => {
+    needText();
+    const out = await callClaude(settings, {
+      system: AI_SYSTEM + " Build a simple mind map of the note. Return ONLY JSON: {\"center\": string, \"branches\": [{\"label\": string, \"children\": [{\"label\": string, \"children\": []}]}]}. 3 to 7 branches, at most 4 children each, labels under 6 words.",
+      content: noteText
+    });
+    const tree = aiParseJSON(out);
+    const built = mindMapSVG(tree);
+    setResult({
+      ...built,
+      tree
+    });
+  });
+  const doSlides = () => run(async () => {
+    needText();
+    const out = await callClaude(settings, {
+      system: AI_SYSTEM + " Turn the note into a short slide deck. Return ONLY JSON: {\"title\": string, \"slides\": [{\"title\": string, \"bullets\": [string]}]}. 4 to 10 slides, 2 to 5 short bullets each, plus a first title slide with no bullets.",
+      content: noteText
+    });
+    const deck = aiParseJSON(out);
+    if (!deck.slides || !deck.slides.length) throw new Error("No slides came back. Try again.");
+    setResult(deck);
+    setSlideIdx(0);
+  });
+  const doDrawing = () => run(async () => {
+    const img = images[imgIdx];
+    if (!img) throw new Error("Add a drawing or photo to the note first.");
+    const block = dataUrlToImageBlock(img.dataUrl);
+    if (!block) throw new Error("That image type can't be read.");
+    const out = await callClaude(settings, {
+      system: AI_SYSTEM + " The user sends a handwritten or drawn page. Read it carefully and turn it into clean typed notes. Return ONLY HTML using h3, p, ul, li, b, i. Transcribe handwriting faithfully, group by headings, describe any diagram in one short line starting with 'Diagram:', and put '[unclear]' where text can't be read. Lines meant as flashcards ('question :: answer') should stay that way.",
+      content: [block, {
+        type: "text",
+        text: "Turn this into clean notes."
+      }]
+    });
+    setResult({
+      html: aiSanitizeHTML(out.replace(/^```(?:html)?/i, "").replace(/```$/, ""))
+    });
+  });
+  const addMindMap = () => run(async () => {
+    const png = await svgToPngDataUrl(result.svg, result.width, result.height);
+    onAddImage(png);
+    onClose();
+  });
+  const addCards = () => {
+    const lines = result.cards.filter((_, i) => picked[i]).map(c => "<p>" + escapeHTML(String(c.q).replace(/\s+/g, " ")) + " :: " + escapeHTML(String(c.a).replace(/\s+/g, " ")) + "</p>").join("");
+    if (!lines) return;
+    onAppendHTML("<h3>Flashcards</h3>" + lines);
+    onClose();
+  };
+  const slidesToHTML = deck => deck.slides.map(s => "<h3>" + escapeHTML(s.title) + "</h3>" + ((s.bullets || []).length ? "<ul>" + s.bullets.map(b => "<li>" + escapeHTML(b) + "</li>").join("") + "</ul>" : "")).join("");
+  const printSlides = () => {
+    const html = result.slides.map(s => `<section style="page-break-after:always;min-height:90vh;padding:48px"><h1 style="font-size:40px">${escapeHTML(s.title)}</h1>${(s.bullets || []).length ? "<ul style='font-size:24px;line-height:1.6'>" + s.bullets.map(b => "<li>" + escapeHTML(b) + "</li>").join("") + "</ul>" : ""}</section>`).join("");
+    printHTML(result.title || title || "Slides", html);
+  };
+  const body = () => {
+    if (!hasKey) {
+      return /*#__PURE__*/React.createElement("div", {
+        className: "ai-body"
+      }, /*#__PURE__*/React.createElement("p", {
+        className: "modal-copy"
+      }, "Paste your Claude API key to turn these tools on. It stays on this device. Notes are sent to Claude only when you press a button here, so leave out patient names and other identifying details."), /*#__PURE__*/React.createElement(AiKeyForm, {
+        settings: settings,
+        onSaved: onSettingsChange
+      }));
+    }
+    if (!mode) {
+      return /*#__PURE__*/React.createElement("div", {
+        className: "ai-grid"
+      }, AI_ACTIONS.map(a => /*#__PURE__*/React.createElement("button", {
+        key: a.id,
+        className: "ai-action",
+        onClick: () => choose(a.id)
+      }, /*#__PURE__*/React.createElement("span", {
+        className: "ai-action-icon"
+      }, a.icon), /*#__PURE__*/React.createElement("span", {
+        className: "ai-action-label"
+      }, a.label), /*#__PURE__*/React.createElement("span", {
+        className: "ai-action-hint"
+      }, a.hint))));
+    }
+    return /*#__PURE__*/React.createElement("div", {
+      className: "ai-body"
+    }, /*#__PURE__*/React.createElement("button", {
+      className: "btn-ghost small",
+      onClick: () => setMode(null)
+    }, "\u2190 All tools"), mode === "format" && /*#__PURE__*/React.createElement(React.Fragment, null, !result && /*#__PURE__*/React.createElement("button", {
+      className: "btn-primary",
+      disabled: busy,
+      onClick: doFormat
+    }, busy ? "Formatting…" : "Format this note"), result && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+      className: "modal-copy"
+    }, "Preview \u2014 nothing changes until you replace the note text."), /*#__PURE__*/React.createElement("div", {
+      className: "ai-preview rte-body",
+      dangerouslySetInnerHTML: {
+        __html: result.html
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      className: "modal-actions"
+    }, /*#__PURE__*/React.createElement("button", {
+      className: "btn-ghost",
+      onClick: () => setResult(null)
+    }, "Discard"), /*#__PURE__*/React.createElement("button", {
+      className: "btn-primary",
+      onClick: () => {
+        onReplaceBody(result.html);
+        onClose();
+      }
+    }, "Replace note text")))), mode === "ask" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      className: "ai-chat"
+    }, chat.length === 0 && /*#__PURE__*/React.createElement("p", {
+      className: "modal-copy"
+    }, "Ask anything about this note, for example \u201Cwhat are the key points?\u201D or \u201Cquiz me on this\u201D."), chat.map((m, i) => /*#__PURE__*/React.createElement("div", {
+      key: i,
+      className: "ai-msg " + m.role
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "ai-msg-text"
+    }, m.content), m.role === "assistant" && /*#__PURE__*/React.createElement("button", {
+      className: "btn-ghost small",
+      onClick: () => {
+        onAppendHTML("<p>" + escapeHTML(m.content).replace(/\n+/g, "<br>") + "</p>");
+        onClose();
+      }
+    }, "Add to note"))), busy && /*#__PURE__*/React.createElement("div", {
+      className: "ai-msg assistant"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "ai-msg-text"
+    }, "Thinking\u2026"))), /*#__PURE__*/React.createElement("div", {
+      className: "ai-ask-row"
+    }, /*#__PURE__*/React.createElement("input", {
+      className: "url-input",
+      placeholder: "Ask about this note\u2026",
+      value: question,
+      onChange: e => setQuestion(e.target.value),
+      onKeyDown: e => e.key === "Enter" && !busy && sendQuestion()
+    }), /*#__PURE__*/React.createElement("button", {
+      className: "btn-primary small",
+      disabled: busy || !question.trim(),
+      onClick: sendQuestion
+    }, "Ask"))), mode === "cards" && /*#__PURE__*/React.createElement(React.Fragment, null, !result && /*#__PURE__*/React.createElement("button", {
+      className: "btn-primary",
+      disabled: busy,
+      onClick: doCards
+    }, busy ? "Making cards…" : "Make flashcards from this note"), result && result.cards && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+      className: "modal-copy"
+    }, "Untick any you don't want. They're added to the note as ", /*#__PURE__*/React.createElement("i", null, "question :: answer"), " lines and become cards when the note saves, and you can edit them any time."), /*#__PURE__*/React.createElement("div", {
+      className: "ai-cards"
+    }, result.cards.map((c, i) => /*#__PURE__*/React.createElement("label", {
+      key: i,
+      className: "ai-card-row"
+    }, /*#__PURE__*/React.createElement("input", {
+      type: "checkbox",
+      checked: !!picked[i],
+      onChange: e => setPicked(p => ({
+        ...p,
+        [i]: e.target.checked
+      }))
+    }), /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("b", null, c.q), /*#__PURE__*/React.createElement("br", null), c.a)))), /*#__PURE__*/React.createElement("div", {
+      className: "modal-actions"
+    }, /*#__PURE__*/React.createElement("button", {
+      className: "btn-ghost",
+      onClick: () => setResult(null)
+    }, "Redo"), /*#__PURE__*/React.createElement("button", {
+      className: "btn-primary",
+      onClick: addCards
+    }, "Add to note")))), mode === "mindmap" && /*#__PURE__*/React.createElement(React.Fragment, null, !result && /*#__PURE__*/React.createElement("button", {
+      className: "btn-primary",
+      disabled: busy,
+      onClick: doMindMap
+    }, busy ? "Drawing map…" : "Make a mind map"), result && result.svg && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      className: "ai-map",
+      dangerouslySetInnerHTML: {
+        __html: result.svg
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      className: "modal-actions"
+    }, /*#__PURE__*/React.createElement("button", {
+      className: "btn-ghost",
+      onClick: () => setResult(null)
+    }, "Redo"), /*#__PURE__*/React.createElement("button", {
+      className: "btn-primary",
+      disabled: busy,
+      onClick: addMindMap
+    }, "Attach to note")))), mode === "slides" && /*#__PURE__*/React.createElement(React.Fragment, null, !result && /*#__PURE__*/React.createElement("button", {
+      className: "btn-primary",
+      disabled: busy,
+      onClick: doSlides
+    }, busy ? "Building slides…" : "Make slides from this note"), result && result.slides && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      className: "ai-slide"
+    }, /*#__PURE__*/React.createElement("h2", null, result.slides[slideIdx].title), /*#__PURE__*/React.createElement("ul", null, (result.slides[slideIdx].bullets || []).map((b, i) => /*#__PURE__*/React.createElement("li", {
+      key: i
+    }, b))), /*#__PURE__*/React.createElement("span", {
+      className: "ai-slide-count"
+    }, slideIdx + 1, " / ", result.slides.length)), /*#__PURE__*/React.createElement("div", {
+      className: "ai-slide-nav"
+    }, /*#__PURE__*/React.createElement("button", {
+      className: "btn-ghost small",
+      disabled: slideIdx === 0,
+      onClick: () => setSlideIdx(i => i - 1)
+    }, "\u25C0 Back"), /*#__PURE__*/React.createElement("button", {
+      className: "btn-ghost small",
+      disabled: slideIdx >= result.slides.length - 1,
+      onClick: () => setSlideIdx(i => i + 1)
+    }, "Next \u25B6")), /*#__PURE__*/React.createElement("div", {
+      className: "modal-actions"
+    }, /*#__PURE__*/React.createElement("button", {
+      className: "btn-ghost",
+      onClick: () => setResult(null)
+    }, "Redo"), /*#__PURE__*/React.createElement("button", {
+      className: "btn-ghost",
+      onClick: printSlides
+    }, "Print / save PDF"), /*#__PURE__*/React.createElement("button", {
+      className: "btn-primary",
+      onClick: () => {
+        onAppendHTML(slidesToHTML(result));
+        onClose();
+      }
+    }, "Add outline to note")))), mode === "drawing" && /*#__PURE__*/React.createElement(React.Fragment, null, images.length === 0 ? /*#__PURE__*/React.createElement("p", {
+      className: "modal-copy"
+    }, "This note has no drawings or pictures yet. Add one with \u270E Draw or + Add image, then come back.") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+      className: "modal-copy"
+    }, "Pick the drawing or photo to read:"), /*#__PURE__*/React.createElement("div", {
+      className: "ai-thumbs"
+    }, images.map((im, i) => /*#__PURE__*/React.createElement("button", {
+      key: im.id,
+      className: "ai-thumb" + (i === imgIdx ? " selected" : ""),
+      onClick: () => {
+        setImgIdx(i);
+        setResult(null);
+      }
+    }, /*#__PURE__*/React.createElement("img", {
+      src: im.dataUrl,
+      alt: ""
+    })))), !result && /*#__PURE__*/React.createElement("button", {
+      className: "btn-primary",
+      disabled: busy,
+      onClick: doDrawing
+    }, busy ? "Reading…" : "Turn it into notes"), result && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      className: "ai-preview rte-body",
+      dangerouslySetInnerHTML: {
+        __html: result.html
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      className: "modal-actions"
+    }, /*#__PURE__*/React.createElement("button", {
+      className: "btn-ghost",
+      onClick: () => setResult(null)
+    }, "Redo"), /*#__PURE__*/React.createElement("button", {
+      className: "btn-primary",
+      onClick: () => {
+        onAppendHTML(result.html);
+        onClose();
+      }
+    }, "Add to note"))))), error && /*#__PURE__*/React.createElement("p", {
+      className: "gen-error"
+    }, error));
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    className: "modal-backdrop",
+    onClick: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal wide ai-modal",
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal-header"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "eyebrow"
+  }, "\u2726 AI tools"), /*#__PURE__*/React.createElement("button", {
+    className: "modal-close",
+    onClick: onClose
+  }, "\u2715")), body(), hasKey && mode === null && error && /*#__PURE__*/React.createElement("p", {
+    className: "gen-error"
+  }, error)));
+}
+
+// ---------- Infinite whiteboard (full screen, pan and zoom without limit) ----------
+// Strokes are kept as vectors in "board" coordinates, so zooming in or out never loses sharpness
+// and the board has no edge. Saving renders everything drawn so far to one picture for the note,
+// and keeps the vectors with that picture so it can be reopened and edited.
+
+const BOARD_COLORS = ["#241C3D", "#3E7CAB", "#C0569A", "#3F9A8C", "#D9A23B", "#E5484D", "#FFFFFF", "#FFD84D"];
+const BOARD_MIN_K = 0.002;
+const BOARD_MAX_K = 400;
+function boardDrawStroke(ctx, s) {
+  ctx.strokeStyle = s.c;
+  ctx.fillStyle = s.c;
+  ctx.lineWidth = s.w;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  const p = s.p;
+  if (s.t === "pen") {
+    if (p.length === 1) {
+      ctx.beginPath();
+      ctx.arc(p[0][0], p[0][1], s.w / 2, 0, Math.PI * 2);
+      ctx.fill();
+      return;
+    }
+    ctx.beginPath();
+    ctx.moveTo(p[0][0], p[0][1]);
+    for (let i = 1; i < p.length - 1; i++) {
+      const mx = (p[i][0] + p[i + 1][0]) / 2;
+      const my = (p[i][1] + p[i + 1][1]) / 2;
+      ctx.quadraticCurveTo(p[i][0], p[i][1], mx, my);
+    }
+    ctx.lineTo(p[p.length - 1][0], p[p.length - 1][1]);
+    ctx.stroke();
+    return;
+  }
+  const [a, b] = [p[0], p[p.length - 1]];
+  ctx.beginPath();
+  if (s.t === "rect") ctx.strokeRect(Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1]));else if (s.t === "ellipse") {
+    ctx.ellipse((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, Math.max(Math.abs(b[0] - a[0]) / 2, 0.01), Math.max(Math.abs(b[1] - a[1]) / 2, 0.01), 0, 0, Math.PI * 2);
+    ctx.stroke();
+  } else {
+    ctx.moveTo(a[0], a[1]);
+    ctx.lineTo(b[0], b[1]);
+    ctx.stroke();
+    if (s.t === "arrow") {
+      const ang = Math.atan2(b[1] - a[1], b[0] - a[0]);
+      const head = Math.max(s.w * 4, 10 / 1);
+      ctx.beginPath();
+      ctx.moveTo(b[0], b[1]);
+      ctx.lineTo(b[0] - head * Math.cos(ang - Math.PI / 6), b[1] - head * Math.sin(ang - Math.PI / 6));
+      ctx.moveTo(b[0], b[1]);
+      ctx.lineTo(b[0] - head * Math.cos(ang + Math.PI / 6), b[1] - head * Math.sin(ang + Math.PI / 6));
+      ctx.stroke();
+    }
+  }
+}
+function boardBounds(strokes) {
+  let minX = Infinity,
+    minY = Infinity,
+    maxX = -Infinity,
+    maxY = -Infinity;
+  strokes.forEach(s => s.p.forEach(([x, y]) => {
+    const r = s.w / 2;
+    minX = Math.min(minX, x - r);
+    minY = Math.min(minY, y - r);
+    maxX = Math.max(maxX, x + r);
+    maxY = Math.max(maxY, y + r);
+  }));
+  return strokes.length ? {
+    minX,
+    minY,
+    maxX,
+    maxY
+  } : null;
+}
+function Whiteboard({
+  initialBoard,
+  onCancel,
+  onSave
+}) {
+  const canvasRef = useRef(null);
+  const wrapRef = useRef(null);
+  const strokesRef = useRef(initialBoard && initialBoard.strokes ? initialBoard.strokes.map(s => ({
+    ...s
+  })) : []);
+  const redoRef = useRef([]);
+  const viewRef = useRef(initialBoard && initialBoard.view ? {
+    ...initialBoard.view
+  } : {
+    x: 0,
+    y: 0,
+    k: 1
+  });
+  const currentRef = useRef(null); // the stroke being drawn
+  const pointersRef = useRef(new Map());
+  const gestureRef = useRef(null); // pinch/pan state
+  const panRef = useRef(null);
+  const rafRef = useRef(0);
+  const [tool, setTool] = useState("pen");
+  const [color, setColor] = useState(BOARD_COLORS[0]);
+  const [size, setSize] = useState(3);
+  const [dark, setDark] = useState(!!(initialBoard && initialBoard.dark));
+  const [zoomPct, setZoomPct] = useState(100);
+  const [counts, setCounts] = useState({
+    undo: strokesRef.current.length,
+    redo: 0
+  });
+  const toolRef = useRef(tool);
+  toolRef.current = tool;
+  const colorRef = useRef(color);
+  colorRef.current = color;
+  const sizeRef = useRef(size);
+  sizeRef.current = size;
+  const darkRef = useRef(dark);
+  darkRef.current = dark;
+  const bump = () => setCounts({
+    undo: strokesRef.current.length,
+    redo: redoRef.current.length
+  });
+  const draw = () => {
+    cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(() => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const ratio = window.devicePixelRatio || 1;
+      const v = viewRef.current;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = darkRef.current ? "#17171B" : "#FFFFFF";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      // faint dots that scale with the board, so zooming and panning are easy to see
+      let step = 40;
+      while (step * v.k < 18) step *= 5;
+      while (step * v.k > 110) step /= 5;
+      const dot = darkRef.current ? "rgba(255,255,255,0.14)" : "rgba(23,23,27,0.13)";
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      ctx.fillStyle = dot;
+      const w = canvas.width / ratio,
+        h = canvas.height / ratio;
+      const x0 = Math.floor(-v.x / v.k / step) * step,
+        y0 = Math.floor(-v.y / v.k / step) * step;
+      for (let gx = x0; gx < (w - v.x) / v.k; gx += step) {
+        for (let gy = y0; gy < (h - v.y) / v.k; gy += step) {
+          ctx.fillRect(gx * v.k + v.x - 1, gy * v.k + v.y - 1, 2, 2);
+        }
+      }
+      ctx.setTransform(ratio * v.k, 0, 0, ratio * v.k, ratio * v.x, ratio * v.y);
+      strokesRef.current.forEach(s => boardDrawStroke(ctx, s));
+      if (currentRef.current) boardDrawStroke(ctx, currentRef.current);
+    });
+  };
+  const resize = () => {
+    const canvas = canvasRef.current,
+      wrap = wrapRef.current;
+    if (!canvas || !wrap) return;
+    const ratio = window.devicePixelRatio || 1;
+    canvas.width = Math.round(wrap.clientWidth * ratio);
+    canvas.height = Math.round(wrap.clientHeight * ratio);
+    canvas.style.width = wrap.clientWidth + "px";
+    canvas.style.height = wrap.clientHeight + "px";
+    draw();
+  };
+  useEffect(() => {
+    resize();
+    window.addEventListener("resize", resize);
+    // The board is a full-screen layer: stop the page behind it from scrolling or zooming.
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onWheel = e => {
+      e.preventDefault();
+      const rect = canvasRef.current.getBoundingClientRect();
+      zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015)));
+    };
+    const el = canvasRef.current;
+    el.addEventListener("wheel", onWheel, {
+      passive: false
+    });
+    return () => {
+      window.removeEventListener("resize", resize);
+      el.removeEventListener("wheel", onWheel);
+      document.body.style.overflow = prev;
+      cancelAnimationFrame(rafRef.current);
+    };
+  }, []);
+  useEffect(() => {
+    draw();
+  }, [dark]);
+  const toBoard = (clientX, clientY) => {
+    const rect = canvasRef.current.getBoundingClientRect();
+    const v = viewRef.current;
+    return [(clientX - rect.left - v.x) / v.k, (clientY - rect.top - v.y) / v.k];
+  };
+  const setView = v => {
+    viewRef.current = {
+      x: v.x,
+      y: v.y,
+      k: Math.min(BOARD_MAX_K, Math.max(BOARD_MIN_K, v.k))
+    };
+    setZoomPct(Math.round(viewRef.current.k * 100));
+    draw();
+  };
+  const zoomAt = (sx, sy, factor) => {
+    const v = viewRef.current;
+    const k = Math.min(BOARD_MAX_K, Math.max(BOARD_MIN_K, v.k * factor));
+    const f = k / v.k;
+    setView({
+      x: sx - (sx - v.x) * f,
+      y: sy - (sy - v.y) * f,
+      k
+    });
+  };
+  const fitToContent = () => {
+    const b = boardBounds(strokesRef.current);
+    const wrap = wrapRef.current;
+    if (!b || !wrap) {
+      setView({
+        x: wrap ? wrap.clientWidth / 2 : 0,
+        y: wrap ? wrap.clientHeight / 2 : 0,
+        k: 1
+      });
+      return;
+    }
+    const pad = 60;
+    const k = Math.min((wrap.clientWidth - pad * 2) / Math.max(b.maxX - b.minX, 1), (wrap.clientHeight - pad * 2) / Math.max(b.maxY - b.minY, 1));
+    const kk = Math.min(BOARD_MAX_K, Math.max(BOARD_MIN_K, k));
+    setView({
+      x: wrap.clientWidth / 2 - (b.minX + b.maxX) / 2 * kk,
+      y: wrap.clientHeight / 2 - (b.minY + b.maxY) / 2 * kk,
+      k: kk
+    });
+  };
+  useEffect(() => {
+    // start centred on the existing drawing, or on the origin for a fresh board
+    if (initialBoard && initialBoard.view) {
+      setZoomPct(Math.round(viewRef.current.k * 100));
+      draw();
+    } else setView({
+      x: (wrapRef.current ? wrapRef.current.clientWidth : 0) / 2 - 200,
+      y: (wrapRef.current ? wrapRef.current.clientHeight : 0) / 3,
+      k: 1
+    });
+  }, []);
+  const eraseAt = (bx, by) => {
+    const v = viewRef.current;
+    const r = 14 / v.k;
+    const before = strokesRef.current.length;
+    strokesRef.current = strokesRef.current.filter(s => {
+      const pts = s.p;
+      if (s.t === "pen") return !pts.some(([x, y]) => Math.abs(x - bx) < r + s.w && Math.abs(y - by) < r + s.w);
+      const b = boardBounds([s]);
+      return !(bx > b.minX - r && bx < b.maxX + r && by > b.minY - r && by < b.maxY + r);
+    });
+    if (strokesRef.current.length !== before) {
+      redoRef.current = [];
+      bump();
+      draw();
+    }
+  };
+  const startGesture = () => {
+    const pts = [...pointersRef.current.values()];
+    if (pts.length < 2) return;
+    const [a, b] = pts;
+    const rect = canvasRef.current.getBoundingClientRect();
+    gestureRef.current = {
+      dist: Math.hypot(a.x - b.x, a.y - b.y),
+      cx: (a.x + b.x) / 2 - rect.left,
+      cy: (a.y + b.y) / 2 - rect.top
+    };
+  };
+  const onPointerDown = e => {
+    e.preventDefault();
+    try {
+      canvasRef.current.setPointerCapture(e.pointerId);
+    } catch (err) {/* pointer already gone */}
+    pointersRef.current.set(e.pointerId, {
+      x: e.clientX,
+      y: e.clientY,
+      type: e.pointerType
+    });
+    if (pointersRef.current.size >= 2) {
+      // a second finger means pan/zoom: drop the little mark the first finger started
+      currentRef.current = null;
+      startGesture();
+      draw();
+      return;
+    }
+    const isMiddle = e.button === 1;
+    if (toolRef.current === "hand" || isMiddle || e.button === 0 && e.shiftKey && e.pointerType === "mouse") {
+      panRef.current = {
+        x: e.clientX,
+        y: e.clientY,
+        vx: viewRef.current.x,
+        vy: viewRef.current.y
+      };
+      return;
+    }
+    const [bx, by] = toBoard(e.clientX, e.clientY);
+    const v = viewRef.current;
+    if (toolRef.current === "eraser") {
+      currentRef.current = {
+        erase: true
+      };
+      eraseAt(bx, by);
+      return;
+    }
+    const pressure = e.pointerType === "pen" && e.pressure > 0 ? 0.5 + e.pressure : 1;
+    currentRef.current = {
+      t: toolRef.current,
+      c: colorRef.current,
+      w: sizeRef.current * pressure / v.k,
+      p: [[bx, by]]
+    };
+    draw();
+  };
+  const onPointerMove = e => {
+    if (!pointersRef.current.has(e.pointerId)) return;
+    pointersRef.current.set(e.pointerId, {
+      x: e.clientX,
+      y: e.clientY,
+      type: e.pointerType
+    });
+    if (pointersRef.current.size >= 2 && gestureRef.current) {
+      const pts = [...pointersRef.current.values()];
+      const [a, b] = pts;
+      const rect = canvasRef.current.getBoundingClientRect();
+      const dist = Math.hypot(a.x - b.x, a.y - b.y);
+      const cx = (a.x + b.x) / 2 - rect.left,
+        cy = (a.y + b.y) / 2 - rect.top;
+      const g = gestureRef.current;
+      const v = viewRef.current;
+      const factor = g.dist > 0 ? dist / g.dist : 1;
+      const k = Math.min(BOARD_MAX_K, Math.max(BOARD_MIN_K, v.k * factor));
+      const f = k / v.k;
+      // keep the point between the fingers fixed while zooming, and follow it while panning
+      setView({
+        x: cx - (g.cx - v.x) * f,
+        y: cy - (g.cy - v.y) * f,
+        k
+      });
+      gestureRef.current = {
+        dist,
+        cx,
+        cy
+      };
+      return;
+    }
+    if (panRef.current) {
+      setView({
+        x: panRef.current.vx + (e.clientX - panRef.current.x),
+        y: panRef.current.vy + (e.clientY - panRef.current.y),
+        k: viewRef.current.k
+      });
+      return;
+    }
+    const cur = currentRef.current;
+    if (!cur) return;
+    e.preventDefault();
+    const [bx, by] = toBoard(e.clientX, e.clientY);
+    if (cur.erase) {
+      eraseAt(bx, by);
+      return;
+    }
+    if (cur.t === "pen") {
+      const last = cur.p[cur.p.length - 1];
+      if (Math.hypot(bx - last[0], by - last[1]) * viewRef.current.k < 1.2) return;
+      cur.p.push([bx, by]);
+    } else {
+      cur.p = [cur.p[0], [bx, by]];
+    }
+    draw();
+  };
+  const finish = e => {
+    pointersRef.current.delete(e.pointerId);
+    if (pointersRef.current.size < 2) gestureRef.current = null;
+    if (panRef.current && pointersRef.current.size === 0) panRef.current = null;
+    const cur = currentRef.current;
+    if (cur && pointersRef.current.size === 0) {
+      currentRef.current = null;
+      if (!cur.erase) {
+        if (cur.t !== "pen") {
+          const [bx, by] = toBoard(e.clientX, e.clientY);
+          cur.p = [cur.p[0], [bx, by]];
+        }
+        cur.p = cur.p.map(([x, y]) => [Math.round(x * 100) / 100, Math.round(y * 100) / 100]);
+        strokesRef.current = [...strokesRef.current, cur];
+        redoRef.current = [];
+        bump();
+      }
+      draw();
+    }
+  };
+  const undo = () => {
+    if (!strokesRef.current.length) return;
+    redoRef.current = [...redoRef.current, strokesRef.current[strokesRef.current.length - 1]];
+    strokesRef.current = strokesRef.current.slice(0, -1);
+    bump();
+    draw();
+  };
+  const redo = () => {
+    if (!redoRef.current.length) return;
+    strokesRef.current = [...strokesRef.current, redoRef.current[redoRef.current.length - 1]];
+    redoRef.current = redoRef.current.slice(0, -1);
+    bump();
+    draw();
+  };
+  const clearAll = () => {
+    if (!strokesRef.current.length) return;
+    redoRef.current = [...strokesRef.current].reverse();
+    strokesRef.current = [];
+    bump();
+    draw();
+  };
+  const handleSave = () => {
+    const strokes = strokesRef.current;
+    const b = boardBounds(strokes);
+    if (!b) {
+      onCancel();
+      return;
+    }
+    const pad = 24;
+    const w = b.maxX - b.minX + pad * 2,
+      h = b.maxY - b.minY + pad * 2;
+    const scale = Math.min(3, 2200 / Math.max(w, h));
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(w * scale));
+    c.height = Math.max(1, Math.round(h * scale));
+    const ctx = c.getContext("2d");
+    ctx.fillStyle = darkRef.current ? "#17171B" : "#FFFFFF";
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.setTransform(scale, 0, 0, scale, (-b.minX + pad) * scale, (-b.minY + pad) * scale);
+    strokes.forEach(s => boardDrawStroke(ctx, s));
+    onSave(c.toDataURL("image/png"), {
+      strokes,
+      view: viewRef.current,
+      dark: darkRef.current
+    });
+  };
+  const zoomButton = factor => {
+    const wrap = wrapRef.current;
+    zoomAt(wrap.clientWidth / 2, wrap.clientHeight / 2, factor);
+  };
+  const toolBtn = (id, label, title) => /*#__PURE__*/React.createElement("button", {
+    key: id,
+    className: "wb-btn" + (tool === id ? " active" : ""),
+    onClick: () => setTool(id),
+    title: title,
+    "aria-label": title
+  }, label);
+  return /*#__PURE__*/React.createElement("div", {
+    className: "whiteboard"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "wb-top"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "wb-btn",
+    onClick: onCancel,
+    title: "Close without saving"
+  }, "\u2715"), /*#__PURE__*/React.createElement("div", {
+    className: "wb-tools"
+  }, toolBtn("pen", "✎", "Pen"), toolBtn("eraser", "⌫", "Eraser (removes whole strokes)"), toolBtn("hand", "✋", "Move the board (or hold Shift and drag, or use two fingers)"), /*#__PURE__*/React.createElement("span", {
+    className: "wb-sep"
+  }), toolBtn("rect", "▭", "Rectangle"), toolBtn("ellipse", "◯", "Ellipse"), toolBtn("line", "╱", "Line"), toolBtn("arrow", "↗", "Arrow")), /*#__PURE__*/React.createElement("div", {
+    className: "wb-colors"
+  }, BOARD_COLORS.map(c => /*#__PURE__*/React.createElement("button", {
+    key: c,
+    className: "wb-dot" + (color === c && tool !== "eraser" ? " selected" : ""),
+    style: {
+      background: c
+    },
+    onClick: () => {
+      setColor(c);
+      if (tool === "eraser" || tool === "hand") setTool("pen");
+    },
+    "aria-label": "Color " + c
+  }))), /*#__PURE__*/React.createElement("input", {
+    className: "wb-size",
+    type: "range",
+    min: "1",
+    max: "24",
+    value: size,
+    onChange: e => setSize(Number(e.target.value)),
+    title: "Pen size",
+    "aria-label": "Pen size"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "wb-spacer"
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "wb-btn",
+    onClick: undo,
+    disabled: !counts.undo,
+    title: "Undo"
+  }, "\u21BA"), /*#__PURE__*/React.createElement("button", {
+    className: "wb-btn",
+    onClick: redo,
+    disabled: !counts.redo,
+    title: "Redo"
+  }, "\u21BB"), /*#__PURE__*/React.createElement("button", {
+    className: "wb-btn",
+    onClick: clearAll,
+    disabled: !counts.undo,
+    title: "Clear everything (you can undo it)"
+  }, "Clear"), /*#__PURE__*/React.createElement("button", {
+    className: "wb-btn",
+    onClick: () => setDark(d => !d),
+    title: "Switch board between light and dark"
+  }, dark ? "☀" : "☾"), /*#__PURE__*/React.createElement("button", {
+    className: "wb-btn wb-save",
+    onClick: handleSave
+  }, "Add to note")), /*#__PURE__*/React.createElement("div", {
+    className: "wb-canvas-wrap",
+    ref: wrapRef
+  }, /*#__PURE__*/React.createElement("canvas", {
+    ref: canvasRef,
+    className: "wb-canvas",
+    style: {
+      touchAction: "none",
+      cursor: tool === "hand" ? "grab" : "crosshair"
+    },
+    onPointerDown: onPointerDown,
+    onPointerMove: onPointerMove,
+    onPointerUp: finish,
+    onPointerCancel: finish
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "wb-zoom"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "wb-btn",
+    onClick: () => zoomButton(1 / 1.5),
+    title: "Zoom out"
+  }, "\u2212"), /*#__PURE__*/React.createElement("button", {
+    className: "wb-btn wb-zoom-pct",
+    onClick: () => setView({
+      x: viewRef.current.x,
+      y: viewRef.current.y,
+      k: 1
+    }),
+    title: "Back to 100%"
+  }, zoomPct >= 1000 ? Math.round(zoomPct / 100) / 10 + "k%" : zoomPct + "%"), /*#__PURE__*/React.createElement("button", {
+    className: "wb-btn",
+    onClick: () => zoomButton(1.5),
+    title: "Zoom in"
+  }, "+"), /*#__PURE__*/React.createElement("button", {
+    className: "wb-btn",
+    onClick: fitToContent,
+    title: "Fit everything on screen"
+  }, "\u2922")), /*#__PURE__*/React.createElement("div", {
+    className: "wb-hint"
+  }, "Two fingers or scroll wheel: zoom and move. \u270B or Shift-drag: move.")));
 }
 
 // ---------- Icons ----------
@@ -7888,6 +9245,67 @@ function Styles() {
       .overdue-banner { border-radius: 20px; border-color: transparent; background: var(--soft-red); box-shadow: var(--shadow); }
       .files-tip { border-radius: 16px; }
       .brainly-root.dark .note-card, .brainly-root.dark .quick-add-wrap { border: 1px solid var(--border); }
+
+      /* ---- Full-screen drawing (image markup) ---- */
+      .modal-backdrop.draw-fullscreen { padding: 0; align-items: stretch; }
+      .modal.draw-fullscreen { max-width: none; width: 100vw; height: 100vh; height: 100dvh; max-height: none; border-radius: 0; padding: 12px 14px; gap: 8px; box-shadow: none; }
+      .modal.draw-fullscreen .modal-copy { display: none; }
+      .modal.draw-fullscreen .draw-canvas-wrap { flex: 1; min-height: 0; }
+      .modal.draw-fullscreen .draw-canvas { height: 100%; }
+
+      /* ---- Infinite whiteboard ---- */
+      .whiteboard { position: fixed; inset: 0; z-index: 90; display: flex; flex-direction: column; background: var(--bg); color: var(--ink); }
+      .wb-top { display: flex; align-items: center; gap: 8px; padding: 8px 10px; padding-top: max(8px, env(safe-area-inset-top)); background: var(--surface); border-bottom: 1px solid var(--border); flex-wrap: wrap; flex-shrink: 0; }
+      .wb-tools, .wb-colors { display: flex; align-items: center; gap: 4px; }
+      .wb-spacer { flex: 1; }
+      .wb-sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
+      .wb-btn { min-width: 40px; min-height: 40px; padding: 0 12px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface); color: var(--ink); font-size: 16px; display: inline-flex; align-items: center; justify-content: center; }
+      .wb-btn:hover:not(:disabled) { background: var(--soft); }
+      .wb-btn:disabled { opacity: 0.35; cursor: default; }
+      .wb-btn.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+      .wb-save { background: var(--primary); border-color: var(--primary); color: #fff; font-weight: 600; font-size: 14px; }
+      .wb-dot { width: 26px; height: 26px; border-radius: 50%; border: 2px solid var(--border); padding: 0; }
+      .wb-dot.selected { border-color: var(--primary); box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--primary); }
+      .wb-size { width: 90px; accent-color: var(--primary); }
+      .wb-canvas-wrap { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+      .wb-canvas { display: block; }
+      .wb-zoom { position: absolute; right: 12px; bottom: max(12px, env(safe-area-inset-bottom)); display: flex; gap: 6px; background: var(--surface); padding: 6px; border-radius: 16px; box-shadow: var(--shadow); }
+      .wb-zoom-pct { min-width: 64px; font-size: 13px; }
+      .wb-hint { position: absolute; left: 12px; bottom: max(12px, env(safe-area-inset-bottom)); font-size: 12px; color: var(--muted); background: var(--surface); padding: 6px 12px; border-radius: 999px; opacity: 0.85; pointer-events: none; }
+      @media (max-width: 720px) { .wb-hint { display: none; } .wb-size { width: 70px; } }
+
+      /* ---- AI panel ---- */
+      .ai-modal { gap: 14px; }
+      .ai-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+      .ai-action { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; text-align: left; padding: 14px; border-radius: 20px; border: 1px solid var(--border); background: var(--soft); color: var(--ink); }
+      .ai-action:hover { border-color: var(--primary); background: var(--soft-strong); }
+      .ai-action-icon { font-size: 20px; color: var(--primary); }
+      .ai-action-label { font-weight: 700; font-size: 15px; }
+      .ai-action-hint { font-size: 12px; color: var(--muted); line-height: 1.35; }
+      .ai-body { display: flex; flex-direction: column; gap: 12px; }
+      .ai-key-form { display: flex; flex-direction: column; gap: 8px; }
+      .ai-key-row { display: flex; gap: 8px; align-items: center; }
+      .ai-preview { max-height: 45vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 16px; padding: 12px 14px; background: var(--surface); }
+      .ai-chat { display: flex; flex-direction: column; gap: 10px; max-height: 45vh; overflow-y: auto; }
+      .ai-msg { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; max-width: 92%; }
+      .ai-msg.user { align-self: flex-end; align-items: flex-end; }
+      .ai-msg-text { white-space: pre-wrap; line-height: 1.5; padding: 10px 14px; border-radius: 18px; background: var(--soft); }
+      .ai-msg.user .ai-msg-text { background: var(--primary); color: #fff; }
+      .ai-ask-row { display: flex; gap: 8px; }
+      .ai-ask-row .url-input { flex: 1; }
+      .ai-cards { display: flex; flex-direction: column; gap: 8px; max-height: 45vh; overflow-y: auto; }
+      .ai-card-row { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--border); border-radius: 14px; font-size: 14px; line-height: 1.45; }
+      .ai-map { overflow: auto; max-height: 50vh; border: 1px solid var(--border); border-radius: 16px; background: #fff; }
+      .ai-map svg { display: block; max-width: none; }
+      .ai-slide { position: relative; min-height: 220px; background: var(--soft); border-radius: 24px; padding: 28px 32px; }
+      .ai-slide h2 { margin: 0 0 12px; font-size: 26px; }
+      .ai-slide ul { margin: 0; padding-left: 22px; font-size: 17px; line-height: 1.7; }
+      .ai-slide-count { position: absolute; right: 18px; bottom: 12px; font-size: 12px; color: var(--muted); }
+      .ai-slide-nav { display: flex; gap: 8px; justify-content: center; }
+      .ai-thumbs { display: flex; gap: 8px; flex-wrap: wrap; }
+      .ai-thumb { padding: 2px; border: 2px solid var(--border); border-radius: 12px; background: #fff; }
+      .ai-thumb.selected { border-color: var(--primary); }
+      .ai-thumb img { display: block; width: 90px; height: 64px; object-fit: cover; border-radius: 9px; }
 
       @media (max-width: 720px) {
         .brainly-root { flex-direction: column; }
