@@ -1392,7 +1392,18 @@ function Brainly() {
     }
   };
   const exportEverythingToDevice = async () => {
-    const payload = JSON.stringify(data, null, 2);
+    // The AI key goes into the backup only if the person ticked "include in my backup file".
+    const ai = await loadAiSettings();
+    const withKey = ai.apiKey && ai.includeInBackup ? {
+      ...data,
+      aiSettings: {
+        apiKey: ai.apiKey,
+        model: ai.model,
+        workspaceId: ai.workspaceId,
+        includeInBackup: true
+      }
+    } : data;
+    const payload = JSON.stringify(withKey, null, 2);
     const filename = `brainly-export-${nowISO().replace(/[:.]/g, "-")}.json`;
     setDeviceExportBusy(true);
     try {
@@ -1452,8 +1463,16 @@ function Brainly() {
       askConfirm(`Import this file? It has ${noteCount} note${noteCount === 1 ? "" : "s"} and ${cardCount} card${cardCount === 1 ? "" : "s"}. This REPLACES everything currently in the app on this device — if you want to keep what's here now, export a backup first.`, async () => {
         setImportBusy(true);
         try {
-          await persist(parsed);
-          showToast("Import complete");
+          const {
+            aiSettings: importedAi,
+            ...rest
+          } = parsed;
+          await persist(rest);
+          if (importedAi && importedAi.apiKey) {
+            await saveAiSettings(importedAi);
+            window.dispatchEvent(new Event("brainly-ai-changed"));
+          }
+          showToast(importedAi && importedAi.apiKey ? "Import complete — AI key set up too" : "Import complete");
         } finally {
           setImportBusy(false);
         }
@@ -3406,7 +3425,10 @@ function FilesPage({
     model: AI_MODELS[0].id
   });
   useEffect(() => {
-    loadAiSettings().then(setAiSettings);
+    const reload = () => loadAiSettings().then(setAiSettings);
+    reload();
+    window.addEventListener("brainly-ai-changed", reload);
+    return () => window.removeEventListener("brainly-ai-changed", reload);
   }, []);
   return /*#__PURE__*/React.createElement("div", {
     className: "files-page"
@@ -3497,7 +3519,7 @@ function FilesPage({
   }, "the clipper page"), " in your computer\u2019s browser, drag its button to your bookmarks bar, then click it on any article. It saves a small file; load it here with ", /*#__PURE__*/React.createElement("b", null, "Upload a subject file"), " (section 3). It lands in \u201CWeb clippings\u201D, and any ", /*#__PURE__*/React.createElement("i", null, "question :: answer"), " lines become cards."), /*#__PURE__*/React.createElement("li", null, /*#__PURE__*/React.createElement("b", null, "Share from other apps"), " \u2014 on Android, use ", /*#__PURE__*/React.createElement("b", null, "Share \u2192 Brainly"), " in any app to drop text or a link into your \u201CReview\u201D subject."))), /*#__PURE__*/React.createElement("section", {
     className: "files-card"
   }, /*#__PURE__*/React.createElement("h2", null, "5 \xB7 AI helper (Claude)"), /*#__PURE__*/React.createElement("p", null, "Optional. With your own Claude API key, the ", /*#__PURE__*/React.createElement("b", null, "\u2726 AI"), " button inside a note can format it, answer questions about it, make flashcards, a mind map or slides, and turn a drawing into typed notes."), /*#__PURE__*/React.createElement(AiKeyForm, {
-    key: aiSettings.apiKey ? "k" : "n",
+    key: (aiSettings.apiKey || "n") + aiSettings.model + (aiSettings.workspaceId || ""),
     settings: aiSettings,
     onSaved: setAiSettings
   }), /*#__PURE__*/React.createElement("ul", {
@@ -6976,7 +6998,8 @@ async function loadAiSettings() {
     return {
       apiKey: s.apiKey || "",
       model: s.model || AI_MODELS[0].id,
-      workspaceId: s.workspaceId || ""
+      workspaceId: s.workspaceId || "",
+      includeInBackup: !!s.includeInBackup
     };
   } catch (e) {
     return {
@@ -6989,7 +7012,8 @@ async function saveAiSettings(settings) {
   await storage.set(AI_SETTINGS_KEY, JSON.stringify({
     apiKey: settings.apiKey || "",
     model: settings.model || AI_MODELS[0].id,
-    workspaceId: settings.workspaceId || ""
+    workspaceId: settings.workspaceId || "",
+    includeInBackup: !!settings.includeInBackup
   }));
 }
 
@@ -7235,6 +7259,7 @@ function AiKeyForm({
   const [key, setKey] = useState(settings.apiKey || "");
   const [model, setModel] = useState(settings.model);
   const [workspaceId, setWorkspaceId] = useState(settings.workspaceId || "");
+  const [includeInBackup, setIncludeInBackup] = useState(!!settings.includeInBackup);
   const [show, setShow] = useState(false);
   const [msg, setMsg] = useState("");
   const save = async () => {
@@ -7242,12 +7267,14 @@ function AiKeyForm({
       await saveAiSettings({
         apiKey: key.trim(),
         model,
-        workspaceId: workspaceId.trim()
+        workspaceId: workspaceId.trim(),
+        includeInBackup
       });
       onSaved({
         apiKey: key.trim(),
         model,
-        workspaceId: workspaceId.trim()
+        workspaceId: workspaceId.trim(),
+        includeInBackup
       });
       setMsg(key.trim() ? "Saved on this device." : "Key removed.");
     } catch (e) {
@@ -7292,7 +7319,13 @@ function AiKeyForm({
   }, AI_MODELS.map(m => /*#__PURE__*/React.createElement("option", {
     key: m.id,
     value: m.id
-  }, m.label))), /*#__PURE__*/React.createElement("div", {
+  }, m.label))), /*#__PURE__*/React.createElement("label", {
+    className: "ai-backup-opt"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: includeInBackup,
+    onChange: e => setIncludeInBackup(e.target.checked)
+  }), /*#__PURE__*/React.createElement("span", null, "Set this up on my other devices too: include the key in my backup file. Uploading that backup on another device (web or phone) then fills in the key automatically. Anyone who gets the backup file could use your key, so keep it somewhere private like your own Drive.")), /*#__PURE__*/React.createElement("div", {
     className: "files-actions"
   }, /*#__PURE__*/React.createElement("button", {
     type: "button",
@@ -7306,12 +7339,14 @@ function AiKeyForm({
       saveAiSettings({
         apiKey: "",
         model,
-        workspaceId: workspaceId.trim()
+        workspaceId: workspaceId.trim(),
+        includeInBackup
       }).then(() => {
         onSaved({
           apiKey: "",
           model,
-          workspaceId: workspaceId.trim()
+          workspaceId: workspaceId.trim(),
+          includeInBackup
         });
         setMsg("Key removed.");
       });
@@ -9309,6 +9344,8 @@ function Styles() {
       .ai-body { display: flex; flex-direction: column; gap: 12px; }
       .ai-key-form { display: flex; flex-direction: column; gap: 8px; }
       .ai-key-row { display: flex; gap: 8px; align-items: center; }
+      .ai-backup-opt { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; line-height: 1.45; color: var(--muted); }
+      .ai-backup-opt input { margin-top: 3px; accent-color: var(--primary); }
       .ai-preview { max-height: 45vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 16px; padding: 12px 14px; background: var(--surface); }
       .ai-chat { display: flex; flex-direction: column; gap: 10px; max-height: 45vh; overflow-y: auto; }
       .ai-msg { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; max-width: 92%; }
