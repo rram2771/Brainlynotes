@@ -7713,6 +7713,11 @@ const AI_ACTIONS = [{
   label: "Mind map",
   hint: "A simple map you can attach to the note"
 }, {
+  id: "sketch",
+  icon: "✎",
+  label: "Sketchnote",
+  hint: "A hand-drawn visual summary (16:9) you can add to the note"
+}, {
   id: "slides",
   icon: "▭",
   label: "Slides",
@@ -7865,6 +7870,35 @@ function AiPanel({
       ...built,
       tree
     });
+  });
+  const doSketch = () => run(async () => {
+    needText();
+    const out = await callClaude(settings, {
+      system: SKETCH_SYSTEM,
+      content: noteText,
+      maxTokens: 2500
+    });
+    const plan = aiParseJSON(out);
+    if (!plan.items || !plan.items.length) throw new Error("No ideas came back for the sketchnote. Try again.");
+    setResult({
+      ...sketchnoteSVG(plan),
+      plan
+    });
+  });
+  const addSketch = () => run(async () => {
+    const png = await svgToPngDataUrl(result.svg, result.width, result.height);
+    onAddImage(png);
+    onClose();
+  });
+  const saveSketchFile = () => run(async () => {
+    const png = await svgToPngDataUrl(result.svg, result.width, result.height);
+    const blob = await (await fetch(png)).blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "sketchnote-" + slug(title || "notes") + ".png";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => a.remove(), 500);
   });
   const doSlides = () => run(async () => {
     needText();
@@ -8069,7 +8103,31 @@ function AiPanel({
       className: "btn-primary",
       disabled: busy,
       onClick: addMindMap
-    }, "Attach to note")))), mode === "slides" && /*#__PURE__*/React.createElement(React.Fragment, null, !result && /*#__PURE__*/React.createElement("button", {
+    }, "Attach to note")))), mode === "sketch" && /*#__PURE__*/React.createElement(React.Fragment, null, !result && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+      className: "modal-copy"
+    }, "Brainly plans a one-page visual summary of this note and draws it: white paper, black fine-liner outlines, teal, orange and muted-red marker shading, a 3D title box in the middle, doodles and arrows around it, all in hand-printed capitals."), /*#__PURE__*/React.createElement("button", {
+      className: "btn-primary",
+      disabled: busy,
+      onClick: doSketch
+    }, busy ? "Planning and drawing…" : "Draw a sketchnote")), result && result.plan && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      className: "ai-map ai-sketch",
+      dangerouslySetInnerHTML: {
+        __html: result.svg.replace('width="1600" height="900"', 'width="100%"')
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      className: "modal-actions"
+    }, /*#__PURE__*/React.createElement("button", {
+      className: "btn-ghost",
+      onClick: () => setResult(null)
+    }, "Redraw"), /*#__PURE__*/React.createElement("button", {
+      className: "btn-ghost",
+      disabled: busy,
+      onClick: saveSketchFile
+    }, "Save picture"), /*#__PURE__*/React.createElement("button", {
+      className: "btn-primary",
+      disabled: busy,
+      onClick: addSketch
+    }, "Add to note")))), mode === "slides" && /*#__PURE__*/React.createElement(React.Fragment, null, !result && /*#__PURE__*/React.createElement("button", {
       className: "btn-primary",
       disabled: busy,
       onClick: doSlides
@@ -8169,7 +8227,53 @@ function AiPanel({
 const BOARD_COLORS = ["#241C3D", "#3E7CAB", "#C0569A", "#3F9A8C", "#D9A23B", "#E5484D", "#FFFFFF", "#FFD84D"];
 const BOARD_MIN_K = 0.002;
 const BOARD_MAX_K = 400;
+
+// Pictures pasted or dropped onto the board are decoded once and kept here.
+const BOARD_IMG_CACHE = new Map();
+function boardImage(src) {
+  let im = BOARD_IMG_CACHE.get(src);
+  if (!im) {
+    im = new Image();
+    im.onload = () => window.dispatchEvent(new Event("board-redraw"));
+    im.src = src;
+    BOARD_IMG_CACHE.set(src, im);
+  }
+  return im;
+}
+
+// Reads a picture file, shrinks it if it's huge, and keeps transparency (PNG) where it had any.
+function boardLoadPicture(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Couldn't read that picture."));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("Couldn't open that picture."));
+      img.onload = () => {
+        const max = 1600;
+        const k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+        const c = document.createElement("canvas");
+        c.width = Math.max(1, Math.round(img.naturalWidth * k));
+        c.height = Math.max(1, Math.round(img.naturalHeight * k));
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        const png = /png|gif|webp|svg/i.test(file.type);
+        resolve({
+          dataUrl: png ? c.toDataURL("image/png") : c.toDataURL("image/jpeg", 0.88),
+          w: c.width,
+          h: c.height
+        });
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
 function boardDrawStroke(ctx, s) {
+  if (s.t === "img") {
+    const im = boardImage(s.src);
+    if (im.complete && im.naturalWidth) ctx.drawImage(im, s.p[0][0], s.p[0][1], s.p[1][0] - s.p[0][0], s.p[1][1] - s.p[0][1]);
+    return;
+  }
   ctx.strokeStyle = s.c;
   ctx.fillStyle = s.c;
   ctx.lineWidth = s.w;
@@ -8234,6 +8338,38 @@ function boardBounds(strokes) {
     maxY
   } : null;
 }
+function boardSegDist(px, py, ax, ay, bx, by) {
+  const dx = bx - ax,
+    dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  const t = len2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2)) : 0;
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+function boardPointInPoly(x, y, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i][0],
+      yi = poly[i][1],
+      xj = poly[j][0],
+      yj = poly[j][1];
+    if (yi > y !== yj > y && x < (xj - xi) * (y - yi) / (yj - yi || 1e-9) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+// Is a drawn object touched by a tap at (x, y)? `tol` is in board units.
+function boardHit(s, x, y, tol) {
+  if (s.t === "pen") {
+    const p = s.p;
+    if (p.length === 1) return Math.hypot(x - p[0][0], y - p[0][1]) <= tol + s.w;
+    for (let i = 1; i < p.length; i++) if (boardSegDist(x, y, p[i - 1][0], p[i - 1][1], p[i][0], p[i][1]) <= tol + s.w / 2) return true;
+    return false;
+  }
+  const b = boardBounds([s]);
+  if (!b) return false;
+  if (s.t === "line" || s.t === "arrow") return boardSegDist(x, y, s.p[0][0], s.p[0][1], s.p[1][0], s.p[1][1]) <= tol + s.w;
+  return x >= b.minX - tol && x <= b.maxX + tol && y >= b.minY - tol && y <= b.maxY + tol;
+}
 function Whiteboard({
   initialBoard,
   onCancel,
@@ -8241,10 +8377,13 @@ function Whiteboard({
 }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
+  // every object gets an id so it can be selected; older saved boards get ids here
   const strokesRef = useRef(initialBoard && initialBoard.strokes ? initialBoard.strokes.map(s => ({
-    ...s
+    ...s,
+    id: s.id || uid()
   })) : []);
-  const redoRef = useRef([]);
+  const pastRef = useRef([]); // earlier states of the board, for undo (kept as cheap references)
+  const futureRef = useRef([]);
   const viewRef = useRef(initialBoard && initialBoard.view ? {
     ...initialBoard.view
   } : {
@@ -8257,15 +8396,21 @@ function Whiteboard({
   const gestureRef = useRef(null); // pinch/pan state
   const panRef = useRef(null);
   const rafRef = useRef(0);
+  const selRef = useRef([]); // ids of the selected objects
+  const dragRef = useRef(null); // moving or resizing the selection
+  const lassoRef = useRef(null); // the loop being drawn with the lasso
   const [tool, setTool] = useState("pen");
   const [color, setColor] = useState(BOARD_COLORS[0]);
   const [size, setSize] = useState(3);
   const [dark, setDark] = useState(!!(initialBoard && initialBoard.dark));
   const [zoomPct, setZoomPct] = useState(100);
   const [counts, setCounts] = useState({
-    undo: strokesRef.current.length,
-    redo: 0
+    undo: 0,
+    redo: 0,
+    n: strokesRef.current.length
   });
+  const [hasSelection, setHasSelection] = useState(false);
+  const [boardMsg, setBoardMsg] = useState("");
   const toolRef = useRef(tool);
   toolRef.current = tool;
   const colorRef = useRef(color);
@@ -8275,9 +8420,23 @@ function Whiteboard({
   const darkRef = useRef(dark);
   darkRef.current = dark;
   const bump = () => setCounts({
-    undo: strokesRef.current.length,
-    redo: redoRef.current.length
+    undo: pastRef.current.length,
+    redo: futureRef.current.length,
+    n: strokesRef.current.length
   });
+  // call once before any change, so one Undo steps back over the whole change
+  const snapshot = () => {
+    pastRef.current = [...pastRef.current.slice(-80), strokesRef.current];
+    futureRef.current = [];
+  };
+  const setSelection = ids => {
+    selRef.current = ids;
+    setHasSelection(ids.length > 0);
+  };
+  const selStrokes = () => {
+    const ids = new Set(selRef.current);
+    return strokesRef.current.filter(s => ids.has(s.id));
+  };
   const draw = () => {
     cancelAnimationFrame(rafRef.current);
     rafRef.current = requestAnimationFrame(() => {
@@ -8293,9 +8452,8 @@ function Whiteboard({
       let step = 40;
       while (step * v.k < 18) step *= 5;
       while (step * v.k > 110) step /= 5;
-      const dot = darkRef.current ? "rgba(255,255,255,0.14)" : "rgba(23,23,27,0.13)";
       ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-      ctx.fillStyle = dot;
+      ctx.fillStyle = darkRef.current ? "rgba(255,255,255,0.14)" : "rgba(23,23,27,0.13)";
       const w = canvas.width / ratio,
         h = canvas.height / ratio;
       const x0 = Math.floor(-v.x / v.k / step) * step,
@@ -8307,7 +8465,37 @@ function Whiteboard({
       }
       ctx.setTransform(ratio * v.k, 0, 0, ratio * v.k, ratio * v.x, ratio * v.y);
       strokesRef.current.forEach(s => boardDrawStroke(ctx, s));
-      if (currentRef.current) boardDrawStroke(ctx, currentRef.current);
+      if (currentRef.current && !currentRef.current.erase) boardDrawStroke(ctx, currentRef.current);
+      // the lasso loop while it is being drawn
+      const lp = lassoRef.current;
+      if (lp && lp.length > 1) {
+        ctx.save();
+        ctx.lineWidth = 2 / v.k;
+        ctx.strokeStyle = "#3E7CAB";
+        ctx.setLineDash([7 / v.k, 6 / v.k]);
+        ctx.beginPath();
+        ctx.moveTo(lp[0][0], lp[0][1]);
+        lp.forEach(q => ctx.lineTo(q[0], q[1]));
+        ctx.stroke();
+        ctx.restore();
+      }
+      // box and corner handle around whatever is selected
+      if (selRef.current.length) {
+        const b = boardBounds(selStrokes());
+        if (b) {
+          const pad = 5 / v.k;
+          ctx.save();
+          ctx.lineWidth = 2 / v.k;
+          ctx.strokeStyle = "#3E7CAB";
+          ctx.setLineDash([6 / v.k, 5 / v.k]);
+          ctx.strokeRect(b.minX - pad, b.minY - pad, b.maxX - b.minX + pad * 2, b.maxY - b.minY + pad * 2);
+          ctx.setLineDash([]);
+          ctx.fillStyle = "#3E7CAB";
+          const hs = 9 / v.k;
+          ctx.fillRect(b.maxX + pad - hs, b.maxY + pad - hs, hs * 2, hs * 2);
+          ctx.restore();
+        }
+      }
     });
   };
   const resize = () => {
@@ -8391,7 +8579,7 @@ function Whiteboard({
     });
   };
   useEffect(() => {
-    // start centred on the existing drawing, or on the origin for a fresh board
+    // start centred on the existing drawing, or near the origin for a fresh board
     if (initialBoard && initialBoard.view) {
       setZoomPct(Math.round(viewRef.current.k * 100));
       draw();
@@ -8402,17 +8590,11 @@ function Whiteboard({
     });
   }, []);
   const eraseAt = (bx, by) => {
-    const v = viewRef.current;
-    const r = 14 / v.k;
+    const r = 14 / viewRef.current.k;
     const before = strokesRef.current.length;
-    strokesRef.current = strokesRef.current.filter(s => {
-      const pts = s.p;
-      if (s.t === "pen") return !pts.some(([x, y]) => Math.abs(x - bx) < r + s.w && Math.abs(y - by) < r + s.w);
-      const b = boardBounds([s]);
-      return !(bx > b.minX - r && bx < b.maxX + r && by > b.minY - r && by < b.maxY + r);
-    });
+    strokesRef.current = strokesRef.current.filter(s => !boardHit(s, bx, by, r));
     if (strokesRef.current.length !== before) {
-      redoRef.current = [];
+      setSelection(selRef.current.filter(id => strokesRef.current.some(s => s.id === id)));
       bump();
       draw();
     }
@@ -8428,6 +8610,88 @@ function Whiteboard({
       cy: (a.y + b.y) / 2 - rect.top
     };
   };
+
+  // ---- selection actions ----
+  const beginDrag = (mode, bx, by) => {
+    const sel = selStrokes();
+    const box = boardBounds(sel);
+    if (!box) return;
+    snapshot();
+    dragRef.current = {
+      mode,
+      sx: bx,
+      sy: by,
+      box,
+      orig: sel.map(s => ({
+        id: s.id,
+        w: s.w,
+        p: s.p.map(q => q.slice())
+      }))
+    };
+    bump();
+  };
+  const duplicateSelected = () => {
+    const sel = selStrokes();
+    if (!sel.length) return;
+    const off = 36 / viewRef.current.k;
+    const copies = sel.map(s => ({
+      ...s,
+      id: uid(),
+      p: s.p.map(([x, y]) => [x + off, y + off])
+    }));
+    snapshot();
+    strokesRef.current = [...strokesRef.current, ...copies];
+    setSelection(copies.map(c => c.id));
+    setTool("select");
+    bump();
+    draw();
+  };
+  const removeSelected = () => {
+    if (!selRef.current.length) return;
+    const ids = new Set(selRef.current);
+    snapshot();
+    strokesRef.current = strokesRef.current.filter(s => !ids.has(s.id));
+    setSelection([]);
+    bump();
+    draw();
+  };
+  const recolorSelected = c => {
+    const ids = new Set(selRef.current);
+    if (!ids.size) return;
+    snapshot();
+    strokesRef.current = strokesRef.current.map(s => ids.has(s.id) && s.t !== "img" ? {
+      ...s,
+      c
+    } : s);
+    bump();
+    draw();
+  };
+  const undo = () => {
+    if (!pastRef.current.length) return;
+    futureRef.current = [...futureRef.current, strokesRef.current];
+    strokesRef.current = pastRef.current[pastRef.current.length - 1];
+    pastRef.current = pastRef.current.slice(0, -1);
+    setSelection(selRef.current.filter(id => strokesRef.current.some(s => s.id === id)));
+    bump();
+    draw();
+  };
+  const redo = () => {
+    if (!futureRef.current.length) return;
+    pastRef.current = [...pastRef.current, strokesRef.current];
+    strokesRef.current = futureRef.current[futureRef.current.length - 1];
+    futureRef.current = futureRef.current.slice(0, -1);
+    setSelection(selRef.current.filter(id => strokesRef.current.some(s => s.id === id)));
+    bump();
+    draw();
+  };
+  const clearAll = () => {
+    if (!strokesRef.current.length) return;
+    snapshot();
+    strokesRef.current = [];
+    setSelection([]);
+    bump();
+    draw();
+  };
   const onPointerDown = e => {
     e.preventDefault();
     try {
@@ -8439,8 +8703,10 @@ function Whiteboard({
       type: e.pointerType
     });
     if (pointersRef.current.size >= 2) {
-      // a second finger means pan/zoom: drop the little mark the first finger started
+      // a second finger means pan/zoom: drop whatever the first finger started
       currentRef.current = null;
+      lassoRef.current = null;
+      dragRef.current = null;
       startGesture();
       draw();
       return;
@@ -8457,7 +8723,41 @@ function Whiteboard({
     }
     const [bx, by] = toBoard(e.clientX, e.clientY);
     const v = viewRef.current;
-    if (toolRef.current === "eraser") {
+    const tool = toolRef.current;
+    if (tool === "lasso") {
+      lassoRef.current = [[bx, by]];
+      draw();
+      return;
+    }
+    if (tool === "select") {
+      const box = selRef.current.length ? boardBounds(selStrokes()) : null;
+      if (box) {
+        const pad = 5 / v.k,
+          hs = 18 / v.k;
+        if (Math.abs(bx - (box.maxX + pad)) < hs && Math.abs(by - (box.maxY + pad)) < hs) {
+          beginDrag("resize", bx, by);
+          return;
+        }
+        if (bx >= box.minX - pad && bx <= box.maxX + pad && by >= box.minY - pad && by <= box.maxY + pad) {
+          beginDrag("move", bx, by);
+          return;
+        }
+      }
+      const strokes = strokesRef.current;
+      for (let i = strokes.length - 1; i >= 0; i--) {
+        if (boardHit(strokes[i], bx, by, 10 / v.k)) {
+          setSelection([strokes[i].id]);
+          beginDrag("move", bx, by);
+          draw();
+          return;
+        }
+      }
+      setSelection([]);
+      draw();
+      return;
+    }
+    if (tool === "eraser") {
+      snapshot();
       currentRef.current = {
         erase: true
       };
@@ -8466,7 +8766,8 @@ function Whiteboard({
     }
     const pressure = e.pointerType === "pen" && e.pressure > 0 ? 0.5 + e.pressure : 1;
     currentRef.current = {
-      t: toolRef.current,
+      id: uid(),
+      t: tool,
       c: colorRef.current,
       w: sizeRef.current * pressure / v.k,
       p: [[bx, by]]
@@ -8513,6 +8814,45 @@ function Whiteboard({
       });
       return;
     }
+    if (lassoRef.current) {
+      lassoRef.current.push(toBoard(e.clientX, e.clientY));
+      draw();
+      return;
+    }
+    if (dragRef.current) {
+      const d = dragRef.current;
+      const [mx, my] = toBoard(e.clientX, e.clientY);
+      const byId = new Map(d.orig.map(o => [o.id, o]));
+      let fn;
+      if (d.mode === "move") {
+        const dx = mx - d.sx,
+          dy = my - d.sy;
+        fn = o => ({
+          p: o.p.map(([x, y]) => [x + dx, y + dy]),
+          w: o.w
+        });
+      } else {
+        const ow = Math.max(d.box.maxX - d.box.minX, 1e-6);
+        const nw = Math.max(12 / viewRef.current.k, ow + (mx - d.sx));
+        const f = nw / ow;
+        fn = o => ({
+          p: o.p.map(([x, y]) => [d.box.minX + (x - d.box.minX) * f, d.box.minY + (y - d.box.minY) * f]),
+          w: o.w * f
+        });
+      }
+      strokesRef.current = strokesRef.current.map(s => {
+        const o = byId.get(s.id);
+        if (!o) return s;
+        const r = fn(o);
+        return {
+          ...s,
+          p: r.p,
+          w: s.t === "img" ? 0 : r.w
+        };
+      });
+      draw();
+      return;
+    }
     const cur = currentRef.current;
     if (!cur) return;
     e.preventDefault();
@@ -8533,9 +8873,38 @@ function Whiteboard({
   const finish = e => {
     pointersRef.current.delete(e.pointerId);
     if (pointersRef.current.size < 2) gestureRef.current = null;
-    if (panRef.current && pointersRef.current.size === 0) panRef.current = null;
+    if (pointersRef.current.size > 0) return;
+    if (panRef.current) {
+      panRef.current = null;
+      return;
+    }
+    if (dragRef.current) {
+      dragRef.current = null;
+      bump();
+      draw();
+      return;
+    }
+    if (lassoRef.current) {
+      const poly = lassoRef.current;
+      lassoRef.current = null;
+      if (poly.length > 3) {
+        const ids = strokesRef.current.filter(s => {
+          if (s.t === "pen") {
+            const inside = s.p.filter(([x, y]) => boardPointInPoly(x, y, poly)).length;
+            return inside / s.p.length >= 0.5;
+          }
+          const b = boardBounds([s]);
+          return b && boardPointInPoly((b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, poly);
+        }).map(s => s.id);
+        setSelection(ids);
+        if (ids.length) setTool("select"); // ready to move, resize or duplicate straight away
+        else setBoardMsg("Nothing inside that loop. Draw the loop all the way around what you want.");
+      } else setSelection([]);
+      draw();
+      return;
+    }
     const cur = currentRef.current;
-    if (cur && pointersRef.current.size === 0) {
+    if (cur) {
       currentRef.current = null;
       if (!cur.erase) {
         if (cur.t !== "pen") {
@@ -8543,41 +8912,116 @@ function Whiteboard({
           cur.p = [cur.p[0], [bx, by]];
         }
         cur.p = cur.p.map(([x, y]) => [Math.round(x * 100) / 100, Math.round(y * 100) / 100]);
+        snapshot();
         strokesRef.current = [...strokesRef.current, cur];
-        redoRef.current = [];
-        bump();
       }
+      bump();
       draw();
     }
   };
-  const undo = () => {
-    if (!strokesRef.current.length) return;
-    redoRef.current = [...redoRef.current, strokesRef.current[strokesRef.current.length - 1]];
-    strokesRef.current = strokesRef.current.slice(0, -1);
-    bump();
-    draw();
+
+  // ---- pictures: paste, drop, choose a file ----
+  const addPicture = async (file, at) => {
+    try {
+      const pic = await boardLoadPicture(file);
+      const wrap = wrapRef.current;
+      const v = viewRef.current;
+      const w = Math.min(pic.w, wrap.clientWidth * 0.45 / v.k);
+      const h = w * pic.h / pic.w;
+      const cx = at ? at[0] : (wrap.clientWidth / 2 - v.x) / v.k;
+      const cy = at ? at[1] : (wrap.clientHeight / 2 - v.y) / v.k;
+      const id = uid();
+      snapshot();
+      strokesRef.current = [...strokesRef.current, {
+        id,
+        t: "img",
+        src: pic.dataUrl,
+        c: "#000",
+        w: 0,
+        p: [[cx - w / 2, cy - h / 2], [cx + w / 2, cy + h / 2]]
+      }];
+      setSelection([id]);
+      setTool("select");
+      setBoardMsg("");
+      bump();
+      draw();
+    } catch (err) {
+      setBoardMsg(err.message || "Couldn't add that picture.");
+    }
   };
-  const redo = () => {
-    if (!redoRef.current.length) return;
-    strokesRef.current = [...strokesRef.current, redoRef.current[redoRef.current.length - 1]];
-    redoRef.current = redoRef.current.slice(0, -1);
-    bump();
-    draw();
+  const pasteFromButton = async () => {
+    try {
+      const items = await navigator.clipboard.read();
+      let found = false;
+      for (const it of items) {
+        const type = it.types.find(t => t.startsWith("image/"));
+        if (type) {
+          found = true;
+          await addPicture(new File([await it.getType(type)], "pasted.png", {
+            type
+          }));
+        }
+      }
+      if (!found) setBoardMsg("No picture on the clipboard. Copy one first, or use the 🖼 button to choose a file.");
+    } catch (err) {
+      setBoardMsg("This device won't let Brainly read the clipboard from a button. Press Ctrl+V (or long-press and Paste), or use 🖼 to choose a picture.");
+    }
   };
-  const clearAll = () => {
-    if (!strokesRef.current.length) return;
-    redoRef.current = [...strokesRef.current].reverse();
-    strokesRef.current = [];
-    bump();
-    draw();
-  };
-  const handleSave = () => {
+  useEffect(() => {
+    const onPaste = e => {
+      const cd = e.clipboardData;
+      if (!cd) return;
+      let files = Array.from(cd.files || []).filter(f => /^image\//.test(f.type));
+      if (!files.length) files = Array.from(cd.items || []).filter(i => i.kind === "file" && /^image\//.test(i.type)).map(i => i.getAsFile()).filter(Boolean);
+      if (!files.length) return;
+      e.preventDefault();
+      files.forEach(f => addPicture(f));
+    };
+    const onKey = e => {
+      if (/INPUT|TEXTAREA|SELECT/.test(e.target && e.target.tagName || "")) return;
+      const mod = e.ctrlKey || e.metaKey;
+      if ((e.key === "Delete" || e.key === "Backspace") && selRef.current.length) {
+        e.preventDefault();
+        removeSelected();
+      } else if (mod && (e.key === "d" || e.key === "D")) {
+        e.preventDefault();
+        duplicateSelected();
+      } else if (mod && (e.key === "z" || e.key === "Z")) {
+        e.preventDefault();
+        if (e.shiftKey) redo();else undo();
+      } else if (mod && (e.key === "y" || e.key === "Y")) {
+        e.preventDefault();
+        redo();
+      } else if (e.key === "Escape") {
+        setSelection([]);
+        draw();
+      }
+    };
+    const onRedraw = () => draw();
+    document.addEventListener("paste", onPaste);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("board-redraw", onRedraw);
+    return () => {
+      document.removeEventListener("paste", onPaste);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("board-redraw", onRedraw);
+    };
+  }, []);
+  const handleSave = async () => {
     const strokes = strokesRef.current;
     const b = boardBounds(strokes);
     if (!b) {
       onCancel();
       return;
     }
+    // make sure every picture has finished decoding before the board is flattened
+    await Promise.all(strokes.filter(s => s.t === "img").map(s => new Promise(res => {
+      const im = boardImage(s.src);
+      if (im.complete && im.naturalWidth) res();else {
+        im.addEventListener("load", res);
+        im.addEventListener("error", res);
+      }
+    })));
     const pad = 24;
     const w = b.maxX - b.minX + pad * 2,
       h = b.maxY - b.minY + pad * 2;
@@ -8603,7 +9047,10 @@ function Whiteboard({
   const toolBtn = (id, label, title) => /*#__PURE__*/React.createElement("button", {
     key: id,
     className: "wb-btn" + (tool === id ? " active" : ""),
-    onClick: () => setTool(id),
+    onClick: () => {
+      setTool(id);
+      setBoardMsg("");
+    },
     title: title,
     "aria-label": title
   }, label);
@@ -8619,7 +9066,40 @@ function Whiteboard({
     className: "wb-tools"
   }, toolBtn("pen", "✎", "Pen"), toolBtn("eraser", "⌫", "Eraser (removes whole strokes)"), toolBtn("hand", "✋", "Move the board (or hold Shift and drag, or use two fingers)"), /*#__PURE__*/React.createElement("span", {
     className: "wb-sep"
-  }), toolBtn("rect", "▭", "Rectangle"), toolBtn("ellipse", "◯", "Ellipse"), toolBtn("line", "╱", "Line"), toolBtn("arrow", "↗", "Arrow")), /*#__PURE__*/React.createElement("div", {
+  }), toolBtn("lasso", "◌", "Lasso: draw a loop around drawings to select them, then move, resize, duplicate or recolor"), toolBtn("select", "⬚", "Select: tap a drawing or picture, then drag it (or drag the blue corner to resize)"), /*#__PURE__*/React.createElement("button", {
+    className: "wb-btn",
+    onClick: duplicateSelected,
+    disabled: !hasSelection,
+    title: "Duplicate the selection (Ctrl+D)"
+  }, "\u29C9"), /*#__PURE__*/React.createElement("button", {
+    className: "wb-btn",
+    onClick: removeSelected,
+    disabled: !hasSelection,
+    title: "Delete the selection"
+  }, "\uD83D\uDDD1"), /*#__PURE__*/React.createElement("span", {
+    className: "wb-sep"
+  }), toolBtn("rect", "▭", "Rectangle"), toolBtn("ellipse", "◯", "Ellipse"), toolBtn("line", "╱", "Line"), toolBtn("arrow", "↗", "Arrow"), /*#__PURE__*/React.createElement("span", {
+    className: "wb-sep"
+  }), /*#__PURE__*/React.createElement("label", {
+    className: "wb-btn",
+    title: "Add a picture from a file (you can also paste with Ctrl+V or drag one in)",
+    style: {
+      cursor: "pointer"
+    }
+  }, "\uD83D\uDDBC", /*#__PURE__*/React.createElement("input", {
+    type: "file",
+    accept: "image/*",
+    multiple: true,
+    className: "visually-hidden-file",
+    onChange: e => {
+      Array.from(e.target.files || []).forEach(f => addPicture(f));
+      e.target.value = "";
+    }
+  })), /*#__PURE__*/React.createElement("button", {
+    className: "wb-btn",
+    onClick: pasteFromButton,
+    title: "Paste a copied picture (from Excalidraw, Samsung Notes, a screenshot\u2026)"
+  }, "\uD83D\uDCCB")), /*#__PURE__*/React.createElement("div", {
     className: "wb-colors"
   }, BOARD_COLORS.map(c => /*#__PURE__*/React.createElement("button", {
     key: c,
@@ -8630,8 +9110,10 @@ function Whiteboard({
     onClick: () => {
       setColor(c);
       if (tool === "eraser" || tool === "hand") setTool("pen");
+      if (hasSelection) recolorSelected(c);
     },
-    "aria-label": "Color " + c
+    "aria-label": "Color " + c,
+    title: hasSelection ? "Recolor the selection" : "Pen color"
   }))), /*#__PURE__*/React.createElement("input", {
     className: "wb-size",
     type: "range",
@@ -8647,16 +9129,16 @@ function Whiteboard({
     className: "wb-btn",
     onClick: undo,
     disabled: !counts.undo,
-    title: "Undo"
+    title: "Undo (Ctrl+Z)"
   }, "\u21BA"), /*#__PURE__*/React.createElement("button", {
     className: "wb-btn",
     onClick: redo,
     disabled: !counts.redo,
-    title: "Redo"
+    title: "Redo (Ctrl+Y)"
   }, "\u21BB"), /*#__PURE__*/React.createElement("button", {
     className: "wb-btn",
     onClick: clearAll,
-    disabled: !counts.undo,
+    disabled: !counts.n,
     title: "Clear everything (you can undo it)"
   }, "Clear"), /*#__PURE__*/React.createElement("button", {
     className: "wb-btn",
@@ -8673,7 +9155,15 @@ function Whiteboard({
     className: "wb-canvas",
     style: {
       touchAction: "none",
-      cursor: tool === "hand" ? "grab" : "crosshair"
+      cursor: tool === "hand" ? "grab" : tool === "select" ? "default" : "crosshair"
+    },
+    onDragOver: e => e.preventDefault(),
+    onDrop: e => {
+      const files = Array.from(e.dataTransfer.files || []).filter(f => /^image\//.test(f.type));
+      if (!files.length) return;
+      e.preventDefault();
+      const at = toBoard(e.clientX, e.clientY);
+      files.forEach((f, i) => addPicture(f, [at[0] + i * 30, at[1] + i * 30]));
     },
     onPointerDown: onPointerDown,
     onPointerMove: onPointerMove,
@@ -8703,7 +9193,7 @@ function Whiteboard({
     title: "Fit everything on screen"
   }, "\u2922")), /*#__PURE__*/React.createElement("div", {
     className: "wb-hint"
-  }, "Two fingers or scroll wheel: zoom and move. \u270B or Shift-drag: move.")));
+  }, boardMsg || "◌ Lasso a drawing to move, resize (blue corner) or ⧉ duplicate it. Paste pictures with Ctrl+V or 📋, or drag them in.")));
 }
 
 // ---------- AI topic -> full study note (for nursing topics) ----------
@@ -8788,6 +9278,7 @@ function AiTopicModal({
   const [depth, setDepth] = useState("standard");
   const [withDiagrams, setWithDiagrams] = useState(true);
   const [withCards, setWithCards] = useState(true);
+  const [withSketch, setWithSketch] = useState(false);
   const [subjectId, setSubjectId] = useState(defaultSubjectId || subjectOptions[0] && subjectOptions[0].id || "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -8842,6 +9333,23 @@ function AiTopicModal({
             id: uid(),
             dataUrl: await svgToPngDataUrl(m.svg, m.width, m.height)
           });
+        }
+      }
+      if (withSketch) {
+        // A second request turns the finished note into a hand-drawn visual summary picture.
+        try {
+          const planText = await callClaude(settings, {
+            system: SKETCH_SYSTEM,
+            content: htmlToPlainText(html),
+            maxTokens: 2500
+          });
+          const s = sketchnoteSVG(aiParseJSON(planText));
+          images.unshift({
+            id: uid(),
+            dataUrl: await svgToPngDataUrl(s.svg, s.width, s.height)
+          });
+        } catch (e) {
+          setError("The note is ready, but the sketchnote couldn't be drawn (" + (e.message || "error") + "). You can add one later from ✦ AI → Sketchnote inside the note.");
         }
       }
       const tagNames = [...new Set([...keywords, (j.kind || "").toLowerCase(), "ai notes", ...(isMed && j.highAlert ? ["high-alert"] : [])].filter(Boolean))];
@@ -8962,6 +9470,12 @@ function AiTopicModal({
     checked: withCards,
     onChange: e => setWithCards(e.target.checked)
   }), /*#__PURE__*/React.createElement("span", null, "Include flashcards (question :: answer)")), /*#__PURE__*/React.createElement("label", {
+    className: "ai-backup-opt"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: withSketch,
+    onChange: e => setWithSketch(e.target.checked)
+  }), /*#__PURE__*/React.createElement("span", null, "Also draw a hand-drawn sketchnote summary (takes a little longer and uses one more request)")), /*#__PURE__*/React.createElement("label", {
     className: "field-label"
   }, "Save into subject"), /*#__PURE__*/React.createElement("select", {
     className: "parent-select",
@@ -9188,6 +9702,189 @@ function TagsManager({
     onClick: onClose
   }, "Done"))));
 }
+
+// Patrick Hand (SIL Open Font License), latin subset, embedded so the sketchnote draws the same offline and in saved pictures.
+const SKETCH_FONT_B64 = "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";
+// ---------- Sketchnote (hand-drawn visual summary, 16:9) ----------
+// Claude picks the title, the key ideas and an icon for each; the drawing itself is assembled here
+// from a set of simple doodles, so the result looks the same every time: white paper, black
+// fine-liner outlines, teal / orange / muted-red marker shading, a 3D title box in the middle,
+// arrows between ideas and hand-printed capital letters.
+
+const SK = {
+  ink: "#161616",
+  teal: "#2A9D8F",
+  orange: "#F28C28",
+  red: "#C75B5B"
+};
+
+// Each icon is drawn in a 100 x 100 box. `a` is the marker colour used for shading.
+const SKETCH_ICONS = {
+  heart: a => `<path d="M50 84 C8 56 12 20 34 19 C44 18 50 27 50 32 C50 27 56 18 66 19 C88 20 92 56 50 84Z" fill="${a}" fill-opacity=".55" stroke="${SK.ink}" stroke-width="3.2"/><path d="M30 34 C28 40 30 46 34 50" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>`,
+  pill: a => `<g transform="rotate(-38 50 50)"><rect x="14" y="35" width="72" height="30" rx="15" fill="#fff" stroke="${SK.ink}" stroke-width="3.2"/><path d="M50 35 H29 A15 15 0 0 0 29 65 H50Z" fill="${a}" fill-opacity=".6"/><rect x="14" y="35" width="72" height="30" rx="15" fill="none" stroke="${SK.ink}" stroke-width="3.2"/><line x1="50" y1="35" x2="50" y2="65" stroke="${SK.ink}" stroke-width="3"/></g>`,
+  syringe: a => `<g transform="rotate(-40 50 50)"><rect x="24" y="38" width="46" height="24" rx="4" fill="#fff" stroke="${SK.ink}" stroke-width="3.2"/><rect x="34" y="38" width="22" height="24" fill="${a}" fill-opacity=".55"/><line x1="70" y1="50" x2="92" y2="50" stroke="${SK.ink}" stroke-width="3" stroke-linecap="round"/><line x1="24" y1="50" x2="10" y2="50" stroke="${SK.ink}" stroke-width="3.2" stroke-linecap="round"/><line x1="8" y1="40" x2="8" y2="60" stroke="${SK.ink}" stroke-width="3.2" stroke-linecap="round"/></g>`,
+  person: a => `<rect x="36" y="38" width="28" height="30" rx="8" fill="${a}" fill-opacity=".55"/><circle cx="50" cy="22" r="11" fill="#fff" stroke="${SK.ink}" stroke-width="3.2"/><g stroke="${SK.ink}" stroke-width="3.4" stroke-linecap="round" fill="none"><line x1="50" y1="33" x2="50" y2="66"/><path d="M26 50 L50 42 L74 50"/><path d="M50 66 L34 92"/><path d="M50 66 L66 92"/></g>`,
+  chart: a => `<g stroke="${SK.ink}" stroke-width="3.2" stroke-linecap="round" fill="none"><path d="M12 10 V88 H92"/></g><rect x="24" y="56" width="14" height="32" fill="${a}" fill-opacity=".6" stroke="${SK.ink}" stroke-width="3"/><rect x="44" y="38" width="14" height="50" fill="${a}" fill-opacity=".6" stroke="${SK.ink}" stroke-width="3"/><rect x="64" y="22" width="14" height="66" fill="${a}" fill-opacity=".6" stroke="${SK.ink}" stroke-width="3"/><path d="M20 44 L46 28 L66 34 L90 12" fill="none" stroke="${SK.ink}" stroke-width="3" stroke-linecap="round"/>`,
+  clock: a => `<circle cx="50" cy="50" r="38" fill="${a}" fill-opacity=".3" stroke="${SK.ink}" stroke-width="3.4"/><g stroke="${SK.ink}" stroke-width="3.4" stroke-linecap="round"><line x1="50" y1="50" x2="50" y2="26"/><line x1="50" y1="50" x2="68" y2="58"/><line x1="50" y1="16" x2="50" y2="20"/><line x1="84" y1="50" x2="80" y2="50"/><line x1="50" y1="84" x2="50" y2="80"/><line x1="16" y1="50" x2="20" y2="50"/></g>`,
+  magnifier: a => `<circle cx="42" cy="42" r="26" fill="${a}" fill-opacity=".35" stroke="${SK.ink}" stroke-width="3.4"/><line x1="62" y1="62" x2="88" y2="88" stroke="${SK.ink}" stroke-width="7" stroke-linecap="round"/><path d="M30 34 C32 28 36 26 40 25" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>`,
+  bulb: a => `<path d="M50 12 C30 12 22 28 26 42 C28 50 36 56 36 66 H64 C64 56 72 50 74 42 C78 28 70 12 50 12Z" fill="${a}" fill-opacity=".5" stroke="${SK.ink}" stroke-width="3.2"/><g stroke="${SK.ink}" stroke-width="3.2" stroke-linecap="round"><line x1="38" y1="74" x2="62" y2="74"/><line x1="42" y1="83" x2="58" y2="83"/><line x1="50" y1="2" x2="50" y2="-4"/></g>`,
+  warning: a => `<path d="M50 10 L92 84 H8Z" fill="${a}" fill-opacity=".55" stroke="${SK.ink}" stroke-width="3.4" stroke-linejoin="round"/><g stroke="${SK.ink}" stroke-width="5" stroke-linecap="round"><line x1="50" y1="36" x2="50" y2="60"/><line x1="50" y1="71" x2="50" y2="71.5"/></g>`,
+  checklist: a => `<rect x="18" y="12" width="64" height="78" rx="6" fill="#fff" stroke="${SK.ink}" stroke-width="3.2"/><rect x="38" y="6" width="24" height="12" rx="4" fill="${a}" fill-opacity=".6" stroke="${SK.ink}" stroke-width="3"/><g stroke="${SK.ink}" stroke-width="3" stroke-linecap="round" fill="none"><path d="M28 38 l5 5 l9 -10"/><line x1="50" y1="38" x2="72" y2="38"/><path d="M28 56 l5 5 l9 -10"/><line x1="50" y1="56" x2="72" y2="56"/><path d="M28 74 l5 5 l9 -10"/><line x1="50" y1="74" x2="72" y2="74"/></g>`,
+  ecg: a => `<rect x="6" y="22" width="88" height="56" rx="8" fill="${a}" fill-opacity=".22" stroke="${SK.ink}" stroke-width="3.2"/><path d="M12 52 H30 L37 36 L46 70 L56 26 L64 58 L70 52 H88" fill="none" stroke="${SK.ink}" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>`,
+  lungs: a => `<path d="M44 20 C26 24 10 50 12 78 C13 86 24 86 32 78 C40 70 44 58 44 46Z" fill="${a}" fill-opacity=".5" stroke="${SK.ink}" stroke-width="3.2" stroke-linejoin="round"/><path d="M56 20 C74 24 90 50 88 78 C87 86 76 86 68 78 C60 70 56 58 56 46Z" fill="${a}" fill-opacity=".5" stroke="${SK.ink}" stroke-width="3.2" stroke-linejoin="round"/><g stroke="${SK.ink}" stroke-width="3.2" stroke-linecap="round" fill="none"><line x1="50" y1="6" x2="50" y2="40"/><path d="M50 40 L40 52"/><path d="M50 40 L60 52"/></g>`,
+  drop: a => `<path d="M50 8 C50 8 20 46 20 64 C20 80 33 92 50 92 C67 92 80 80 80 64 C80 46 50 8 50 8Z" fill="${a}" fill-opacity=".55" stroke="${SK.ink}" stroke-width="3.2"/><path d="M36 66 C36 72 40 78 46 80" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round"/>`,
+  shield: a => `<path d="M50 8 L86 22 V50 C86 70 70 84 50 94 C30 84 14 70 14 50 V22Z" fill="${a}" fill-opacity=".5" stroke="${SK.ink}" stroke-width="3.2" stroke-linejoin="round"/><path d="M33 50 l12 12 l22 -24" fill="none" stroke="${SK.ink}" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/>`,
+  steth: a => `<g stroke="${SK.ink}" stroke-width="3.4" stroke-linecap="round" fill="none"><path d="M26 10 V44 C26 66 62 66 62 44 V10"/><path d="M44 66 C44 88 78 88 78 66"/></g><circle cx="78" cy="58" r="9" fill="${a}" fill-opacity=".6" stroke="${SK.ink}" stroke-width="3.2"/><circle cx="26" cy="10" r="4" fill="#fff" stroke="${SK.ink}" stroke-width="3"/><circle cx="62" cy="10" r="4" fill="#fff" stroke="${SK.ink}" stroke-width="3"/>`,
+  gear: a => `<circle cx="50" cy="50" r="22" fill="${a}" fill-opacity=".4" stroke="${SK.ink}" stroke-width="3.4"/><circle cx="50" cy="50" r="8" fill="#fff" stroke="${SK.ink}" stroke-width="3"/><g stroke="${SK.ink}" stroke-width="7" stroke-linecap="round"><line x1="50" y1="10" x2="50" y2="22"/><line x1="50" y1="78" x2="50" y2="90"/><line x1="10" y1="50" x2="22" y2="50"/><line x1="78" y1="50" x2="90" y2="50"/><line x1="22" y1="22" x2="30" y2="30"/><line x1="70" y1="70" x2="78" y2="78"/><line x1="78" y1="22" x2="70" y2="30"/><line x1="30" y1="70" x2="22" y2="78"/></g>`
+};
+const SKETCH_ICON_NAMES = Object.keys(SKETCH_ICONS);
+
+// Positions (centres of each idea block) around the middle title, on a 1600 x 900 sheet.
+const SKETCH_SLOTS = {
+  TL: [310, 175],
+  T: [800, 118],
+  TR: [1290, 175],
+  R: [1335, 450],
+  BR: [1290, 725],
+  B: [800, 782],
+  BL: [310, 725],
+  L: [265, 450]
+};
+const SKETCH_LAYOUTS = {
+  3: ["T", "BR", "BL"],
+  4: ["T", "R", "B", "L"],
+  5: ["T", "TR", "BR", "BL", "TL"],
+  6: ["TL", "TR", "R", "BR", "BL", "L"],
+  7: ["TL", "T", "TR", "R", "BR", "BL", "L"],
+  8: ["TL", "T", "TR", "R", "BR", "B", "BL", "L"]
+};
+function sketchWrap(text, maxChars, maxLines) {
+  const words = String(text || "").toUpperCase().replace(/\s+/g, " ").trim().split(" ");
+  const lines = [];
+  let cur = "";
+  words.forEach(w => {
+    if ((cur + " " + w).trim().length > maxChars && cur) {
+      lines.push(cur);
+      cur = w;
+    } else cur = (cur + " " + w).trim();
+  });
+  if (cur) lines.push(cur);
+  if (lines.length > maxLines) {
+    const kept = lines.slice(0, maxLines);
+    kept[maxLines - 1] = kept[maxLines - 1].replace(/\s*\S*$/, "") + "…";
+    return kept;
+  }
+  return lines;
+}
+function sketchnoteSVG(plan) {
+  const esc = escapeHTML;
+  const W = 1600,
+    H = 900;
+  const accents = [SK.teal, SK.orange, SK.red];
+  const items = (plan.items || []).slice(0, 8);
+  const slots = SKETCH_LAYOUTS[Math.min(8, Math.max(3, items.length))] || SKETCH_LAYOUTS[6];
+  const title = sketchWrap(plan.title || "NOTES", 16, 2);
+  const text = (x, y, s, size, extra) => `<text x="${x}" y="${y}" text-anchor="middle" font-family="'SketchHand', 'Patrick Hand', 'Segoe Print', 'Bradley Hand', cursive" font-size="${size}" fill="${SK.ink}" ${extra || ""}>${esc(s)}</text>`;
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`;
+  svg += `<defs><style>@font-face{font-family:'SketchHand';src:url(data:font/woff2;base64,${SKETCH_FONT_B64}) format('woff2');}</style>`;
+  svg += `<filter id="rough" x="-2%" y="-2%" width="104%" height="104%"><feTurbulence type="fractalNoise" baseFrequency="0.035" numOctaves="2" seed="7" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="3.2"/></filter>`;
+  svg += `<marker id="arr" viewBox="0 0 12 12" refX="9" refY="6" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1 L10 6 L1 11" fill="none" stroke="${SK.ink}" stroke-width="2" stroke-linecap="round"/></marker></defs>`;
+  svg += `<rect width="${W}" height="${H}" fill="#ffffff"/>`;
+  svg += `<g filter="url(#rough)">`;
+
+  // 3D title box in the middle
+  const bw = 470,
+    bh = 150,
+    bx = W / 2 - bw / 2,
+    by = H / 2 - bh / 2 - 20;
+  svg += `<rect x="${bx + 16}" y="${by + 16}" width="${bw}" height="${bh}" rx="6" fill="${SK.teal}" fill-opacity=".85" stroke="${SK.ink}" stroke-width="3"/>`;
+  svg += `<path d="M${bx} ${by} L${bx + 16} ${by + 16} M${bx + bw} ${by} L${bx + bw + 16} ${by + 16} M${bx + bw} ${by + bh} L${bx + bw + 16} ${by + bh + 16} M${bx} ${by + bh} L${bx + 16} ${by + bh + 16}" stroke="${SK.ink}" stroke-width="3" fill="none"/>`;
+  svg += `<rect x="${bx}" y="${by}" width="${bw}" height="${bh}" rx="6" fill="#ffffff" stroke="${SK.ink}" stroke-width="4"/>`;
+  svg += `<rect x="${bx + 10}" y="${by + 10}" width="${bw - 20}" height="${bh - 20}" rx="4" fill="none" stroke="${SK.orange}" stroke-width="2.4" stroke-dasharray="3 7" stroke-linecap="round"/>`;
+  const tSize = title.length > 1 ? 52 : 62;
+  title.forEach((ln, i) => {
+    const y = by + bh / 2 + (title.length > 1 ? i === 0 ? -6 : 52 : 22);
+    svg += text(W / 2, y, ln, tSize, 'font-weight="700"');
+  });
+  if (plan.takeaway) {
+    const tk = sketchWrap(plan.takeaway, 34, 2);
+    svg += `<path d="M${W / 2 - 150} ${by + bh + 62} q 40 -10 80 0 t 80 0 t 80 0 t 80 0" stroke="${SK.orange}" stroke-width="4" fill="none" stroke-linecap="round"/>`;
+    tk.forEach((ln, i) => {
+      svg += text(W / 2 + 8, by + bh + 98 + i * 30, ln, 26);
+    });
+  }
+
+  // idea blocks around it
+  const centres = [];
+  items.forEach((it, i) => {
+    const [cx, cy] = SKETCH_SLOTS[slots[i]];
+    const a = accents[i % 3];
+    const icon = SKETCH_ICONS[it.icon] || SKETCH_ICONS[SKETCH_ICON_NAMES[i % SKETCH_ICON_NAMES.length]];
+    const isTop = cy < 450,
+      isMid = cy === 450;
+    // marker blob behind the doodle
+    svg += `<ellipse cx="${cx}" cy="${cy - 52}" rx="62" ry="50" fill="${a}" fill-opacity=".28" transform="rotate(${i * 23 % 40 - 20} ${cx} ${cy - 52})"/>`;
+    svg += `<g transform="translate(${cx - 45} ${cy - 100}) scale(.9)">${icon(a)}</g>`;
+    const label = sketchWrap(it.label || "", 15, 2);
+    let y = cy + 2;
+    // marker stripe under the label
+    svg += `<rect x="${cx - 118}" y="${y + 6 + (label.length - 1) * 30}" width="236" height="9" rx="4" fill="${a}" fill-opacity=".55"/>`;
+    label.forEach((ln, k) => {
+      svg += text(cx, y + 30 * k + 4, ln, 31, 'font-weight="700"');
+      y += 0;
+    });
+    const lblH = label.length * 30;
+    (it.points || []).slice(0, 3).forEach((p, k) => {
+      const lines = sketchWrap(p, 30, 1);
+      svg += text(cx, cy + lblH + 26 + k * 24, "• " + lines[0], 20);
+    });
+    centres.push({
+      cx,
+      cy,
+      a,
+      isTop,
+      isMid
+    });
+  });
+
+  // arrows from the title out to each idea, and a flow arrow from one idea to the next
+  const tcx = W / 2 + 8,
+    tcy = by + bh / 2 + 8;
+  centres.forEach((c, i) => {
+    const dx = c.cx - tcx,
+      dy = c.cy - 40 - tcy;
+    const len = Math.hypot(dx, dy) || 1;
+    const sx = tcx + dx / len * (Math.abs(dx) > Math.abs(dy) * 1.6 ? 262 : 150);
+    const sy = tcy + dy / len * (Math.abs(dx) > Math.abs(dy) * 1.6 ? 90 : 105);
+    const ex = c.cx - dx / len * 150,
+      ey = c.cy - 52 - dy / len * 70;
+    const mx = (sx + ex) / 2 + dy / len * 26,
+      my = (sy + ey) / 2 - dx / len * 26;
+    svg += `<path d="M${sx.toFixed(0)} ${sy.toFixed(0)} Q ${mx.toFixed(0)} ${my.toFixed(0)} ${ex.toFixed(0)} ${ey.toFixed(0)}" fill="none" stroke="${SK.ink}" stroke-width="3" stroke-linecap="round" marker-end="url(#arr)"/>`;
+    const n = centres[(i + 1) % centres.length];
+    if (centres.length > 3 && i < centres.length - 1) {
+      const fx = (c.cx + n.cx) / 2,
+        fy = (c.cy + n.cy) / 2;
+      const ox = (n.cy - c.cy) * 0.12,
+        oy = -(n.cx - c.cx) * 0.12;
+      svg += `<path d="M${(c.cx + (n.cx - c.cx) * 0.3).toFixed(0)} ${(c.cy + (n.cy - c.cy) * 0.3 - 30).toFixed(0)} Q ${(fx + ox).toFixed(0)} ${(fy + oy - 30).toFixed(0)} ${(c.cx + (n.cx - c.cx) * 0.7).toFixed(0)} ${(c.cy + (n.cy - c.cy) * 0.7 - 30).toFixed(0)}" fill="none" stroke="${SK.orange}" stroke-width="3" stroke-dasharray="2 9" stroke-linecap="round" marker-end="url(#arr)"/>`;
+    }
+  });
+
+  // small doodles in the corners and gaps: stars, sparkles, a tiny graph
+  const star = (x, y, r, col) => `<path d="M${x} ${y - r} L${x + r * 0.28} ${y - r * 0.28} L${x + r} ${y} L${x + r * 0.28} ${y + r * 0.28} L${x} ${y + r} L${x - r * 0.28} ${y + r * 0.28} L${x - r} ${y} L${x - r * 0.28} ${y - r * 0.28}Z" fill="${col}" fill-opacity=".7" stroke="${SK.ink}" stroke-width="2.2" stroke-linejoin="round"/>`;
+  svg += star(60, 60, 20, SK.orange) + star(1545, 62, 16, SK.teal) + star(1540, 845, 20, SK.red) + star(58, 842, 16, SK.orange);
+  svg += `<g transform="translate(1440 400) scale(.6)" opacity=".95">${SKETCH_ICONS.chart(SK.teal)}</g>`;
+  svg += `<g transform="translate(120 330) scale(.55)" opacity=".95">${SKETCH_ICONS.person(SK.orange)}</g>`;
+  svg += `<path d="M640 70 q 12 -14 24 0 t 24 0" stroke="${SK.red}" stroke-width="3.2" fill="none" stroke-linecap="round"/><path d="M930 835 q 12 -14 24 0 t 24 0" stroke="${SK.teal}" stroke-width="3.2" fill="none" stroke-linecap="round"/>`;
+  svg += `</g></svg>`;
+  return {
+    svg,
+    width: W,
+    height: H
+  };
+}
+const SKETCH_SYSTEM = AI_SYSTEM + " Plan a visual-thinking sketchnote that summarises the note below on one 16:9 page. Return ONLY JSON: " + '{"title": string (1-4 words, the main topic), "takeaway": string (one short sentence, the single most important point), ' + '"items": [{"label": string (1-3 words), "icon": one of ' + SKETCH_ICON_NAMES.join("|") + ', "points": [string] (2-3 very short phrases, max 5 words each)}]}. ' + "Use 5 to 8 items that cover the key ideas in a sensible order (for a disease: what it is, causes, signs, tests, treatment, nursing care, red flags). " + "Pick the icon that best matches each idea. Use only facts from the note.";
 
 // ---------- Icons ----------
 
@@ -10215,7 +10912,7 @@ function Styles() {
       /* ---- Infinite whiteboard ---- */
       .whiteboard { position: fixed; inset: 0; z-index: 90; display: flex; flex-direction: column; background: var(--bg); color: var(--ink); }
       .wb-top { display: flex; align-items: center; gap: 8px; padding: 8px 10px; padding-top: max(8px, env(safe-area-inset-top)); background: var(--surface); border-bottom: 1px solid var(--border); flex-wrap: wrap; flex-shrink: 0; }
-      .wb-tools, .wb-colors { display: flex; align-items: center; gap: 4px; }
+      .wb-tools, .wb-colors { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
       .wb-spacer { flex: 1; }
       .wb-sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
       .wb-btn { min-width: 40px; min-height: 40px; padding: 0 12px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface); color: var(--ink); font-size: 16px; display: inline-flex; align-items: center; justify-content: center; }
@@ -10263,6 +10960,7 @@ function Styles() {
       .ai-body { display: flex; flex-direction: column; gap: 12px; }
       .ai-key-form { display: flex; flex-direction: column; gap: 8px; }
       .ai-key-row { display: flex; gap: 8px; align-items: center; }
+      .ai-sketch svg { width: 100%; height: auto; }
       .ai-backup-opt { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; line-height: 1.45; color: var(--muted); }
       .ai-backup-opt input { margin-top: 3px; accent-color: var(--primary); }
       .ai-preview { max-height: 45vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 16px; padding: 12px 14px; background: var(--surface); }
