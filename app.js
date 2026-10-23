@@ -261,6 +261,41 @@ function stripHighlights(html) {
   return out;
 }
 
+// ---- Read aloud (the device's own speech voice; works offline where the device has one) ----
+function speechAvailable() {
+  return typeof window !== "undefined" && "speechSynthesis" in window && typeof SpeechSynthesisUtterance !== "undefined";
+}
+function stopSpeaking() {
+  if (speechAvailable()) window.speechSynthesis.cancel();
+}
+// Long text is read in sentence-sized pieces because some voices stop partway through a long block.
+function speakText(text, onEnd) {
+  if (!speechAvailable()) return false;
+  const synth = window.speechSynthesis;
+  synth.cancel();
+  const pieces = String(text || "").replace(/\s+::\s+/g, ". ").split(/(?<=[.!?])\s+|\n+/).map(s => s.trim()).filter(Boolean);
+  const chunks = [];
+  let cur = "";
+  pieces.forEach(p => {
+    if ((cur + " " + p).length > 220 && cur) {
+      chunks.push(cur);
+      cur = p;
+    } else cur = (cur + " " + p).trim();
+  });
+  if (cur) chunks.push(cur);
+  if (!chunks.length) return false;
+  chunks.forEach((c, i) => {
+    const u = new SpeechSynthesisUtterance(c);
+    u.rate = 1;
+    if (i === chunks.length - 1) {
+      u.onend = () => onEnd && onEnd();
+      u.onerror = () => onEnd && onEnd();
+    }
+    synth.speak(u);
+  });
+  return true;
+}
+
 // A clip sent straight from another website is untrusted: rebuild it from plain strings and keep
 // only simple text tags (plus http(s) links and pictures), so a page can't slip script into a note.
 function sanitizeClipPayload(p) {
@@ -3338,6 +3373,7 @@ function Brainly() {
     onSettingsChange: setAppAi,
     subjectOptions: flatSubjectOptions,
     defaultSubjectId: selectedSubjectId && selectedSubjectId !== FILES_VIEW ? selectedSubjectId : null,
+    existingNotes: data.notes,
     onCreate: async p => {
       await saveNote({
         subjectId: p.subjectId
@@ -3348,7 +3384,7 @@ function Brainly() {
         images: p.images,
         color: null,
         subjectId: p.subjectId,
-        linkedNoteIds: []
+        linkedNoteIds: p.linkedNoteIds || []
       });
       setSelectedSubjectId(p.subjectId);
       setSelectedTagIds([]);
@@ -5921,6 +5957,17 @@ function NoteEditor({
   const [imgError, setImgError] = useState("");
   const [showDraw, setShowDraw] = useState(false);
   const [pendingHighlight, setPendingHighlight] = useState(null); // { front, back } | null
+  const [speaking, setSpeaking] = useState(false);
+  const toggleSpeak = () => {
+    if (speaking) {
+      stopSpeaking();
+      setSpeaking(false);
+      return;
+    }
+    const text = (title ? title + ". " : "") + htmlToPlainText(bodyHTML);
+    setSpeaking(speakText(text, () => setSpeaking(false)));
+  };
+  useEffect(() => () => stopSpeaking(), []);
   const [showAi, setShowAi] = useState(false);
   const [aiSettings, setAiSettings] = useState({
     apiKey: "",
@@ -6083,7 +6130,11 @@ function NoteEditor({
     className: "eyebrow"
   }, note.id ? "Edit note" : "New note"), /*#__PURE__*/React.createElement("div", {
     className: "note-editor-header-actions"
-  }, !isSplitPane && note.id && (onSplitWithCards || onSplitWithNote) && /*#__PURE__*/React.createElement("div", {
+  }, speechAvailable() && /*#__PURE__*/React.createElement("button", {
+    className: "btn-ghost small",
+    onClick: toggleSpeak,
+    title: "Read this note aloud"
+  }, speaking ? "■ Stop" : "🔊 Listen"), !isSplitPane && note.id && (onSplitWithCards || onSplitWithNote) && /*#__PURE__*/React.createElement("div", {
     className: "split-menu-wrap"
   }, /*#__PURE__*/React.createElement("button", {
     className: "btn-ghost small",
@@ -6858,6 +6909,10 @@ function ReviewSessionInner({
   const [starredIds, setStarredIds] = useState(() => new Set(cards.filter(c => c.starred).map(c => c.id)));
   const current = order[index];
   const done = index >= order.length;
+  useEffect(() => {
+    stopSpeaking();
+  }, [index]);
+  useEffect(() => () => stopSpeaking(), []);
   const handleAnswer = async isCorrect => {
     if (!current) return;
     await onAnswer(current.id, isCorrect);
@@ -6932,7 +6987,15 @@ function ReviewSessionInner({
       handleStar();
     },
     title: starredIds.has(current.id) ? "Unstar" : "Star this card"
-  }, starredIds.has(current.id) ? "★" : "☆"), /*#__PURE__*/React.createElement("div", {
+  }, starredIds.has(current.id) ? "★" : "☆"), speechAvailable() && /*#__PURE__*/React.createElement("button", {
+    className: "review-speak",
+    onClick: e => {
+      e.stopPropagation();
+      speakText(flipped ? current.back : current.front);
+    },
+    title: "Read this side aloud",
+    "aria-label": "Read aloud"
+  }, "\uD83D\uDD0A"), /*#__PURE__*/React.createElement("div", {
     className: "flip-card-label"
   }, flipped ? "Answer" : "Question"), flipped ? /*#__PURE__*/React.createElement(React.Fragment, null, current.backImage && /*#__PURE__*/React.createElement("img", {
     src: current.backImage,
@@ -7566,6 +7629,11 @@ const AI_ACTIONS = [{
   label: "Ask",
   hint: "Ask questions about this note"
 }, {
+  id: "quiz",
+  icon: "✔",
+  label: "Quiz me",
+  hint: "Answer questions one at a time and get feedback"
+}, {
   id: "cards",
   icon: "▤",
   label: "Flashcards",
@@ -7602,6 +7670,8 @@ function AiPanel({
   const [error, setError] = useState("");
   const [result, setResult] = useState(null); // shape depends on mode
   const [chat, setChat] = useState([]);
+  const [quiz, setQuiz] = useState([]);
+  const [quizAnswer, setQuizAnswer] = useState("");
   const [question, setQuestion] = useState("");
   const [picked, setPicked] = useState({});
   const [slideIdx, setSlideIdx] = useState(0);
@@ -7656,6 +7726,43 @@ function AiPanel({
       maxTokens: 1500
     });
     setChat([...history, {
+      role: "assistant",
+      content: out
+    }]);
+  });
+  const QUIZ_SYSTEM = () => AI_SYSTEM + " You are a friendly quiz master for a nurse studying the note below. Ask ONE question at a time, mixing recall and short practical scenarios, using only what the note covers. After the student answers: say clearly whether it was right, correct it in one or two short lines from the note, then ask the next question. If they say 'stop' or 'done', give a short score and the topics to revisit. Keep every message short.\n\nNOTE:\n" + noteText;
+  const startQuiz = () => run(async () => {
+    needText();
+    const history = [{
+      role: "user",
+      content: "Start the quiz with the first question."
+    }];
+    setQuiz(history);
+    const out = await callClaude(settings, {
+      system: QUIZ_SYSTEM(),
+      history,
+      maxTokens: 800
+    });
+    setQuiz([...history, {
+      role: "assistant",
+      content: out
+    }]);
+  });
+  const sendQuizAnswer = () => run(async () => {
+    const a = quizAnswer.trim();
+    if (!a) return;
+    const history = [...quiz, {
+      role: "user",
+      content: a
+    }];
+    setQuiz(history);
+    setQuizAnswer("");
+    const out = await callClaude(settings, {
+      system: QUIZ_SYSTEM(),
+      history,
+      maxTokens: 800
+    });
+    setQuiz([...history, {
       role: "assistant",
       content: out
     }]);
@@ -7817,7 +7924,39 @@ function AiPanel({
       className: "btn-primary small",
       disabled: busy || !question.trim(),
       onClick: sendQuestion
-    }, "Ask"))), mode === "cards" && /*#__PURE__*/React.createElement(React.Fragment, null, !result && /*#__PURE__*/React.createElement("button", {
+    }, "Ask"))), mode === "quiz" && /*#__PURE__*/React.createElement(React.Fragment, null, quiz.length === 0 ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+      className: "modal-copy"
+    }, "Brainly asks one question at a time from this note, checks your answer and explains it. Type \u201Cstop\u201D any time for your score."), /*#__PURE__*/React.createElement("button", {
+      className: "btn-primary",
+      disabled: busy,
+      onClick: startQuiz
+    }, busy ? "Getting the first question…" : "Start the quiz")) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      className: "ai-chat"
+    }, quiz.map((m, i) => i === 0 ? null : /*#__PURE__*/React.createElement("div", {
+      key: i,
+      className: "ai-msg " + m.role
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "ai-msg-text"
+    }, m.content), m.role === "assistant" && speechAvailable() && /*#__PURE__*/React.createElement("button", {
+      className: "btn-ghost small",
+      onClick: () => speakText(m.content)
+    }, "\uD83D\uDD0A Read aloud"))), busy && /*#__PURE__*/React.createElement("div", {
+      className: "ai-msg assistant"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "ai-msg-text"
+    }, "Thinking\u2026"))), /*#__PURE__*/React.createElement("div", {
+      className: "ai-ask-row"
+    }, /*#__PURE__*/React.createElement("input", {
+      className: "url-input",
+      placeholder: "Your answer\u2026",
+      value: quizAnswer,
+      onChange: e => setQuizAnswer(e.target.value),
+      onKeyDown: e => e.key === "Enter" && !busy && sendQuizAnswer()
+    }), /*#__PURE__*/React.createElement("button", {
+      className: "btn-primary small",
+      disabled: busy || !quizAnswer.trim(),
+      onClick: sendQuizAnswer
+    }, "Answer")))), mode === "cards" && /*#__PURE__*/React.createElement(React.Fragment, null, !result && /*#__PURE__*/React.createElement("button", {
       className: "btn-primary",
       disabled: busy,
       onClick: doCards
@@ -8564,15 +8703,17 @@ const TOPIC_KINDS = [{
   id: "other",
   label: "Something else"
 }];
-const TOPIC_SYSTEM = AI_SYSTEM + " The user is a nurse who wants a compact study note on a topic. Return ONLY JSON with this shape: " + '{"title": string (topic name plus its type, e.g. "Cardiomyopathy (Disease)"), ' + '"kind": "disease"|"medication"|"procedure"|"lab"|"other", ' + '"what": string (2-3 short plain-language sentences: what it is), ' + '"sections": [{"heading": string, "bullets": [string]}], ' + '"flow": [string] (4-8 short steps for the disease process or the drug\'s mechanism of action, in order), ' + '"mindmap": {"center": string, "branches": [{"label": string, "children": [{"label": string, "children": []}]}]}, ' + '"flashcards": [{"q": string, "a": string}], ' + '"summary": string (2-3 lines), ' + '"keywords": [string] (4-8 short tag words)}. ' + "Rules: use short, easy-to-scan wording; bullets under 14 words, 3-7 per section. " + "Sections for a disease: Types or causes; How it develops (disease process); Signs and symptoms; Diagnosis and key tests; Treatment; What the RN needs to know (assessment, monitoring, interventions, patient teaching, red flags and when to call the provider); What the provider needs to know. " + "Sections for a medication: Drug class; Mechanism of action; Uses; Side effects and adverse effects; Contraindications and cautions; Nursing considerations (monitoring, administration, labs to watch); Patient teaching; Red flags and when to call the provider. " + "Sections for a procedure, test, lab or other topic: adapt sensibly (purpose, how it works or is done, normal and abnormal findings, preparation, RN responsibilities, complications, patient teaching). " + "Never invent doses, numbers or facts; give typical reference ranges only when you are confident and otherwise say to check current references or the facility protocol. " + "Flashcards must be one fact each with short answers.";
+const TOPIC_SYSTEM = AI_SYSTEM + " The user is a nurse who wants a compact study note on a topic. Return ONLY JSON with this shape: " + '{"title": string (topic name plus its type, e.g. "Cardiomyopathy (Disease)"), ' + '"kind": "disease"|"medication"|"procedure"|"lab"|"other", ' + '"what": string (2-3 short plain-language sentences: what it is), ' + '"sections": [{"heading": string, "bullets": [string]}], ' + '"flow": [string] (4-8 short steps for the disease process or the drug\'s mechanism of action, in order), ' + '"mindmap": {"center": string, "branches": [{"label": string, "children": [{"label": string, "children": []}]}]}, ' + '"flashcards": [{"q": string, "a": string}], ' + '"summary": string (2-3 lines), ' + '"keywords": [string] (4-8 short tag words), "related": [string] (3-6 closely related conditions, drugs or topics worth linking to), "highAlert": boolean (true only for a medication that is a recognised high-alert drug)}. ' + "Rules: use short, easy-to-scan wording; bullets under 14 words, 3-7 per section. " + "Sections for a disease: Types or causes; How it develops (disease process); Signs and symptoms; Diagnosis and key tests; Treatment; What the RN needs to know (assessment, monitoring, interventions, patient teaching, red flags and when to call the provider); What the provider needs to know. " + "Sections for a medication: Drug class; Mechanism of action; Uses; Side effects and adverse effects; Contraindications and cautions; Before you give it (checks, labs and vital signs to review, reasons to hold and call the provider); Nursing considerations (monitoring, administration, labs to watch); Patient teaching; Red flags and when to call the provider. " + "Sections for a procedure, test, lab or other topic: adapt sensibly (purpose, how it works or is done, normal and abnormal findings, preparation, RN responsibilities, complications, patient teaching). " + "Never invent doses, numbers or facts; give typical reference ranges only when you are confident and otherwise say to check current references or the facility protocol. " + "Flashcards must be one fact each with short answers.";
 function AiTopicModal({
   settings,
   onSettingsChange,
   subjectOptions,
   defaultSubjectId,
+  existingNotes,
   onCreate,
   onClose
 }) {
+  const [linkPick, setLinkPick] = useState({});
   const [topic, setTopic] = useState("");
   const [kind, setKind] = useState("auto");
   const [depth, setDepth] = useState("standard");
@@ -8603,6 +8744,10 @@ function AiTopicModal({
       const esc = escapeHTML;
       let html = "<h2>" + esc(j.title || t) + "</h2>";
       html += "<p><i>AI-generated study note. Check it against your facility policy and current references before relying on it.</i></p>";
+      const isMed = kind === "medication" || j.kind === "medication";
+      if (isMed && j.highAlert) {
+        html += "<p><b>⚠ High-alert medication:</b> verify the order and do an independent double-check per your facility policy before giving it.</p>";
+      }
       if (j.what) html += "<h3>What it is</h3><p>" + esc(j.what) + "</p>";
       (j.sections || []).forEach(s => {
         if (!s || !s.heading || !(s.bullets || []).length) return;
@@ -8630,13 +8775,33 @@ function AiTopicModal({
           });
         }
       }
-      const tagNames = [...new Set([...keywords, (j.kind || "").toLowerCase(), "ai notes"].filter(Boolean))];
+      const tagNames = [...new Set([...keywords, (j.kind || "").toLowerCase(), "ai notes", ...(isMed && j.highAlert ? ["high-alert"] : [])].filter(Boolean))];
+      // Link to notes you already have on related topics (matched by title); each can be unticked.
+      const plain = s => String(s || "").toLowerCase().replace(/\(.*?\)/g, "").trim();
+      const own = plain(j.title || t);
+      const topicWord = plain(t);
+      const terms = [...(j.related || []), ...keywords].map(plain).filter(s => s.length >= 4 && s !== topicWord && s !== own);
+      const links = (existingNotes || []).filter(n => {
+        const nt = plain(n.title);
+        if (nt.length < 4 || nt === own || nt === topicWord) return false;
+        return terms.some(x => x === nt || x.includes(nt) || nt.includes(x));
+      }).slice(0, 6).map(n => ({
+        id: n.id,
+        title: n.title
+      }));
+      const pick = {};
+      links.forEach(l => {
+        pick[l.id] = true;
+      });
+      setLinkPick(pick);
       setDraft({
         title: j.title || t,
         html,
         images,
         tagNames,
-        cardCount: cards.length
+        cardCount: cards.length,
+        links,
+        highAlert: !!(isMed && j.highAlert)
       });
     } catch (e) {
       setError(e.message || "Something went wrong.");
@@ -8656,7 +8821,8 @@ function AiTopicModal({
         bodyHTML: draft.html,
         images: draft.images,
         tagNames: draft.tagNames,
-        subjectId
+        subjectId,
+        linkedNoteIds: draft.links.filter(l => linkPick[l.id]).map(l => l.id)
       });
       onClose();
     } catch (e) {
@@ -8776,7 +8942,21 @@ function AiTopicModal({
   }, draft.tagNames.map(t => /*#__PURE__*/React.createElement("span", {
     key: t,
     className: "tag-pill"
-  }, "#", t))), /*#__PURE__*/React.createElement("div", {
+  }, "#", t))), draft.links.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "ai-links"
+  }, /*#__PURE__*/React.createElement("label", {
+    className: "field-label"
+  }, "Link to notes you already have"), draft.links.map(l => /*#__PURE__*/React.createElement("label", {
+    key: l.id,
+    className: "ai-backup-opt"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: !!linkPick[l.id],
+    onChange: e => setLinkPick(p => ({
+      ...p,
+      [l.id]: e.target.checked
+    }))
+  }), /*#__PURE__*/React.createElement("span", null, l.title)))), /*#__PURE__*/React.createElement("div", {
     className: "modal-actions"
   }, /*#__PURE__*/React.createElement("button", {
     className: "btn-ghost",
@@ -9887,6 +10067,9 @@ function Styles() {
       .wb-hint { position: absolute; left: 12px; bottom: max(12px, env(safe-area-inset-bottom)); font-size: 12px; color: var(--muted); background: var(--surface); padding: 6px 12px; border-radius: 999px; opacity: 0.85; pointer-events: none; }
       @media (max-width: 720px) { .wb-hint { display: none; } .wb-size { width: 70px; } }
 
+      .ai-links { display: flex; flex-direction: column; gap: 6px; }
+      .review-speak { position: absolute; top: 10px; left: 12px; width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); font-size: 16px; display: inline-flex; align-items: center; justify-content: center; z-index: 2; }
+      .review-speak:hover { background: var(--soft); }
       .ai-topic-row { display: flex; gap: 8px; flex-wrap: wrap; }
       .ai-topic-row .parent-select { flex: 1; min-width: 150px; }
       .ai-topic-tags { display: flex; gap: 6px; flex-wrap: wrap; }
